@@ -1,0 +1,5 @@
+/* Tailwindcss directives. Tailwind is an easy to use package for css and react */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

@@ -1,0 +1,1 @@
+// curl -X POST https://us-central1-superheroboardv2.cloudfunctions.net/shipHeroWebhook -H "Content-Type: application/json" -d '{"event":"order_allocated", "data":{"order_id":"12345","customer_name":"Kevin","items":["SKU123"]}}'
