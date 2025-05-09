@@ -22,9 +22,11 @@ function App() {
   const needsShippedToday = (allocatedAt) => {
     if (!allocatedAt) return false;
 
-    const alloc = new Date(allocatedAt);
-    const now = new Date();
+    const alloc = allocatedAt.toDate
+      ? allocatedAt.toDate()
+      : new Date(allocatedAt);
 
+    const now = new Date();
     const cutoff = new Date(now);
     cutoff.setHours(8, 0, 0, 0);
 
@@ -48,7 +50,25 @@ function App() {
     return shipDateStr === todayStr;
   };
 
-  const ordersToShipToday = orders.filter(order => needsShippedToday(order.allocated_at));
+  const ordersToShipToday = orders.filter(order =>
+    needsShippedToday(order.allocated_at) &&
+    order.status !== 'shipped'
+  );
+
+  const shippedToday = orders.filter(order => {
+    if (order.status !== 'shipped' || !order.shippedAt) return false;
+
+    try {
+      const shipDate = order.shippedAt.toDate
+        ? order.shippedAt.toDate()
+        : new Date(order.shippedAt);
+
+      const now = new Date();
+      return shipDate.toDateString() === now.toDateString();
+    } catch {
+      return false;
+    }
+  });
 
   return (
     <div className="p-8 font-sans">
@@ -61,10 +81,20 @@ function App() {
         </div>
 
         <div className="text-6xl font-bold">
-          {orders.length - ordersToShipToday.length}
+          {orders.filter(order =>
+            !needsShippedToday(order.allocated_at) &&
+            order.status !== 'shipped'
+          ).length}
         </div>
         <div className="text-2xl text-gray-600">
           Needs shipped tomorrow
+        </div>
+
+        <div className="text-6xl font-bold mt-10">
+          {shippedToday.length}
+        </div>
+        <div className="text-2xl text-gray-600">
+          Shipped today
         </div>
       </div>
 
@@ -77,6 +107,7 @@ function App() {
               <th className="border p-2">Webhook Type</th>
               <th className="border p-2">Line Items</th>
               <th className="border p-2">Allocated At</th>
+              <th className="border p-2">Shipped At</th>
             </tr>
           </thead>
           <tbody>
@@ -89,7 +120,32 @@ function App() {
                     ? `${order.line_items.length} item(s)`
                     : '—'}
                 </td>
-                <td className="border p-2">{order.allocated_at}</td>
+                <td className="border p-2">
+                  {(() => {
+                    try {
+                      if (!order.allocated_at) return '—';
+                      const date = order.allocated_at.toDate
+                        ? order.allocated_at.toDate()
+                        : new Date(order.allocated_at);
+                      return date.toLocaleString();
+                    } catch {
+                      return '—';
+                    }
+                  })()}
+                </td>
+                <td className="border p-2">
+                  {(() => {
+                    try {
+                      if (!order.shippedAt) return '—';
+                      const date = order.shippedAt.toDate
+                        ? order.shippedAt.toDate()
+                        : new Date(order.shippedAt);
+                      return date.toLocaleString();
+                    } catch {
+                      return '—';
+                    }
+                  })()}
+                </td>
               </tr>
             ))}
           </tbody>
