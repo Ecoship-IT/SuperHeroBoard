@@ -25,6 +25,7 @@ exports.shipHeroWebhook = functions.https.onRequest(async (req, res) => {
         account_uuid: data.account_uuid || null,
         allocated_at: data.allocated_at || new Date().toISOString(),
         line_items: data.line_items || [],
+        ready_to_ship: data.ready_to_ship === 1,
         status: 'allocated',
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
@@ -66,6 +67,61 @@ exports.shipHeroWebhook = functions.https.onRequest(async (req, res) => {
 
       console.log(`✅ Saved shipment + updated order: ${shipment.order_number}`);
       res.status(200).send('OK');
+      return;
+    }
+
+    if (data.webhook_type === 'Order Canceled') {
+      const docId = data.order_number;
+      if (!docId) {
+        console.warn('⚠️ Canceled webhook missing order_number');
+        res.status(400).send('Missing order_number');
+        return;
+      }
+
+      await db.collection('orders').doc(docId).set({
+        status: 'cancelled', // Use two L's to match your app logic
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      console.log(`Marked order as cancelled: ${docId}`);
+      res.status(200).send('Order cancellation processed');
+      return;
+    }
+
+    if (data.items && Array.isArray(data.items)) {
+      const clearedOrderIds = [...new Set(data.items.map(item => item.order_id))]; // Unique order IDs
+
+      const batch = db.batch();
+
+      clearedOrderIds.forEach(orderId => {
+        const docRef = db.collection('orders').doc(orderId.toString());
+        batch.set(docRef, {
+          status: 'cleared',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      });
+
+      await batch.commit();
+      console.log(`Cleared tote orders: ${clearedOrderIds.join(', ')}`);
+      res.status(200).send('Tote cleared processed');
+      return;
+    }
+
+    if (data.webhook_type === 'Order Deallocated') {
+      const docId = data.order_number;
+      if (!docId) {
+        console.warn('Deallocated webhook missing order_number');
+        res.status(400).send('Missing order_number');
+        return;
+      }
+
+      await db.collection('orders').doc(docId).set({
+        status: 'deallocated',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+
+      console.log(`Marked order as deallocated: ${docId}`);
+      res.status(200).send('Order deallocation processed');
       return;
     }
 
