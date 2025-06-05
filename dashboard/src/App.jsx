@@ -1,10 +1,167 @@
 import { useEffect, useState } from 'react';
+import { Routes, Route, Link, useNavigate } from 'react-router-dom';
 import { db } from './firebase';
-import { collection, onSnapshot, query, orderBy, doc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import EFMProductSizes from './EFMProductSizes';
 
-function App() {
+const FilterSection = ({ 
+  clientValue, 
+  onClientChange, 
+  statusValue, 
+  onStatusChange,
+  dateRangeValue,
+  onDateRangeChange,
+  customStart,
+  onCustomStartChange,
+  customEnd,
+  onCustomEndChange,
+  slaValue,
+  onSLAChange,
+  showSLA = false,
+  searchValue,
+  onSearchChange,
+  searchInputValue,
+  onSearchInputChange,
+  searchPlaceholder = "Search by order number...",
+  uniqueClients,
+  statusOptions,
+  dateRangeOptions,
+  slaOptions
+}) => {
+  const handleSearch = () => {
+    onSearchChange(searchInputValue);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      handleSearch();
+    }
+  };
+
+  const handleClearSearch = () => {
+    onSearchInputChange('');
+    onSearchChange('');
+  };
+
+  return (
+    <div className="p-4 border-b">
+      <div className="flex flex-wrap gap-2 sm:gap-4">
+        <div className="w-full sm:flex-1 sm:min-w-[260px] lg:min-w-[300px]">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Search</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={searchInputValue}
+              onChange={(e) => onSearchInputChange(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder={searchPlaceholder}
+              className="flex-1 border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            <button
+              onClick={handleSearch}
+              className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors duration-150"
+              title="Search"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </button>
+            {(searchInputValue || searchValue) && (
+              <button
+                onClick={handleClearSearch}
+                className="px-3 py-2 bg-gray-400 text-white rounded hover:bg-gray-500 transition-colors duration-150"
+                title="Clear search"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex-1 min-w-[120px] sm:min-w-[135px] lg:min-w-[170px]">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Client</label>
+          <select
+            value={clientValue}
+            onChange={(e) => onClientChange(e.target.value)}
+            className="w-full border rounded px-2 py-1"
+          >
+            <option value="all">All Clients</option>
+            {uniqueClients.map(client => (
+              <option key={client.value} value={client.value}>{client.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex-1 min-w-[110px] sm:min-w-[130px] lg:min-w-[150px]">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+          <select
+            value={statusValue}
+            onChange={(e) => onStatusChange(e.target.value)}
+            className="w-full border rounded px-2 py-1"
+          >
+            {statusOptions.map(status => (
+              <option key={status.value} value={status.value}>{status.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex-1 min-w-[120px] sm:min-w-[140px] lg:min-w-[160px]">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Date Range</label>
+          <select
+            value={dateRangeValue}
+            onChange={(e) => onDateRangeChange(e.target.value)}
+            className="w-full border rounded px-2 py-1"
+          >
+            <option value="all">All Time</option>
+            {dateRangeOptions.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </div>
+        {dateRangeValue === 'custom' && (
+          <div className="flex gap-2 sm:gap-4 w-full sm:flex-1 sm:min-w-[280px] lg:min-w-[350px]">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => onCustomStartChange(e.target.value)}
+                className="w-full border rounded px-2 py-1"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => onCustomEndChange(e.target.value)}
+                className="w-full border rounded px-2 py-1"
+              />
+            </div>
+          </div>
+        )}
+        {showSLA && (
+          <div className="flex-1 min-w-[110px] sm:min-w-[130px] lg:min-w-[150px]">
+            <label className="block text-sm font-medium text-gray-700 mb-1">SLA Status</label>
+            <select
+              value={slaValue}
+              onChange={(e) => onSLAChange(e.target.value)}
+              className="w-full border rounded px-2 py-1"
+            >
+              {slaOptions.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+function Dashboard() {
   const [orders, setOrders] = useState([]);
+  const [notReadyToShipOrders, setNotReadyToShipOrders] = useState([]);
   const [showAllClients, setShowAllClients] = useState(false);
   const [currentSlide, setCurrentSlide] = useState('clientList');
   const [sortField, setSortField] = useState('allocated_at');
@@ -16,13 +173,17 @@ function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRefreshConfirming, setIsRefreshConfirming] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
+  const [refreshLog, setRefreshLog] = useState([]);
 
   // Filter states
   const [selectedClient, setSelectedClient] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
-  const [dateRange, setDateRange] = useState('today');
+  const [dateRange, setDateRange] = useState('all');
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');
+  const [todayOrderSearch, setTodayOrderSearch] = useState('');
+  const [todayOrderSearchInput, setTodayOrderSearchInput] = useState('');
   
   // All orders table filters
   const [allOrdersClient, setAllOrdersClient] = useState('all');
@@ -31,6 +192,11 @@ function App() {
   const [allOrdersCustomStartDate, setAllOrdersCustomStartDate] = useState('');
   const [allOrdersCustomEndDate, setAllOrdersCustomEndDate] = useState('');
   const [allOrdersSLAMet, setAllOrdersSLAMet] = useState('all');
+  const [allOrdersSearch, setAllOrdersSearch] = useState('');
+  const [allOrdersSearchInput, setAllOrdersSearchInput] = useState('');
+
+  // Add new state for trend view
+  const [trendTimeframe, setTrendTimeframe] = useState('daily'); // 'daily', 'weekly', 'monthly'
 
   const pageSizeOptions = [25, 50, 100, 250, 500];
   const dateRangeOptions = [
@@ -44,7 +210,7 @@ function App() {
     { value: 'all', label: 'All Statuses' },
     { value: 'allocated', label: 'Allocated' },
     { value: 'shipped', label: 'Shipped' },
-    { value: 'cancelled', label: 'Cancelled' },
+    { value: 'canceled', label: 'Canceled' },
     { value: 'cleared', label: 'Cleared' },
     { value: 'deallocated', label: 'Deallocated' }
   ];
@@ -98,14 +264,34 @@ function App() {
     "QWNjb3VudDo4NTQ0OA==": "Liv Holistic",
     "QWNjb3VudDo4NTQ1MA==": "Sustainable Threads",
     "QWNjb3VudDo4NTQ1OA==": "Just Tall Ltd",
-    "QWNjb3VudDo4NTQ3MQ==": "Dancing Moon Coffee Co."
+    "QWNjb3VudDo4NTQ3MQ==": "Dancing Moon Coffee Co.",
+    "QWNjb3VudDo4NTc4Nw==": "Oley Valley Health"
   };
+
+  // Add window width state
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+
+  // Add resize listener
+  useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   useEffect(() => {
     const q = query(collection(db, 'orders'), orderBy('allocated_at', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setOrders(data);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const q = query(collection(db, 'not_ready_to_ship'), orderBy('removed_at', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setNotReadyToShipOrders(data);
     });
     return () => unsubscribe();
   }, []);
@@ -120,25 +306,49 @@ function App() {
   const needsShippedToday = (allocatedAt) => {
     if (!allocatedAt) return false;
     const alloc = allocatedAt.toDate ? allocatedAt.toDate() : new Date(allocatedAt);
-    const now = new Date();
-    const cutoff = new Date(now);
-    cutoff.setHours(8, 0, 0, 0);
-    const isBeforeCutoff = alloc < cutoff;
-    let shipDate = new Date(now);
+    
+    // Convert allocation time to Eastern Time
+    const allocEastern = new Date(alloc.toLocaleString("en-US", {timeZone: "America/New_York"}));
+    
+    // Get current date in Eastern Time
+    const nowEastern = new Date(new Date().toLocaleString("en-US", {timeZone: "America/New_York"}));
+    
+    // Create cutoff time (8 AM Eastern on the allocation date)
+    const cutoffEastern = new Date(allocEastern);
+    cutoffEastern.setHours(8, 0, 0, 0);
+    
+    const isBeforeCutoff = allocEastern < cutoffEastern;
+    let shipDate = new Date(allocEastern);
     if (!isBeforeCutoff) shipDate.setDate(shipDate.getDate() + 1);
-    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) shipDate.setDate(shipDate.getDate() + 1);
-    return shipDate.toISOString().split('T')[0] === now.toISOString().split('T')[0];
+    
+    // Skip weekends
+    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) {
+      shipDate.setDate(shipDate.getDate() + 1);
+    }
+    
+    return shipDate.toISOString().split('T')[0] === nowEastern.toISOString().split('T')[0];
   };
 
   const getRequiredShipDate = (allocatedAt) => {
     if (!allocatedAt) return null;
     const alloc = allocatedAt.toDate ? allocatedAt.toDate() : new Date(allocatedAt);
-    const cutoff = new Date(alloc);
-    cutoff.setHours(8, 0, 0, 0);
-    const isBeforeCutoff = alloc < cutoff;
-    let shipDate = new Date(alloc);
+    
+    // Convert allocation time to Eastern Time
+    const allocEastern = new Date(alloc.toLocaleString("en-US", {timeZone: "America/New_York"}));
+    
+    // Create cutoff time (8 AM Eastern on the allocation date)
+    const cutoffEastern = new Date(allocEastern);
+    cutoffEastern.setHours(8, 0, 0, 0);
+    
+    const isBeforeCutoff = allocEastern < cutoffEastern;
+    let shipDate = new Date(allocEastern);
     if (!isBeforeCutoff) shipDate.setDate(shipDate.getDate() + 1);
-    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) shipDate.setDate(shipDate.getDate() + 1);
+    
+    // Skip weekends
+    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) {
+      shipDate.setDate(shipDate.getDate() + 1);
+    }
+    
     return shipDate;
   };
 
@@ -158,7 +368,7 @@ function App() {
   const ordersToShipToday = orders.filter(
     order => 
       needsShippedToday(order.allocated_at) &&
-      !['shipped', 'cancelled', 'cleared', 'deallocated'].includes(order.status) &&
+      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
       order.ready_to_ship === true
   );
 
@@ -176,7 +386,7 @@ function App() {
   orders
     .filter(order => 
       needsShippedToday(order.allocated_at) &&
-      !['shipped', 'cancelled', 'cleared', 'deallocated'].includes(order.status) &&
+      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
       order.ready_to_ship === true
     )
     .forEach(order => {
@@ -224,15 +434,15 @@ function App() {
     }
   });
 
-  const exportToCSV = () => {
+  const exportToCSV = (data, filename) => {
     const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Shipped At'];
-    const csvData = sortedOrders.map(order => [
+    const csvData = data.map(order => [
       order.order_number,
       accountMap[order.account_uuid] || order.account_uuid || 'Unknown',
       order.status,
       Array.isArray(order.line_items) ? order.line_items.length : 0,
       order.allocated_at?.toDate?.()?.toLocaleString() || new Date(order.allocated_at).toLocaleString(),
-      order.shippedAt?.toDate?.()?.toLocaleString() || (order.shippedAt ? new Date(order.shippedAt).toLocaleString() : '—')
+      order.shippedAt?.toDate?.()?.toLocaleString() || (order.shippedAt ? new Date(order.shippedAt).toLocaleString() : 'Not Shipped')
     ]);
 
     const csvContent = [headers, ...csvData]
@@ -242,7 +452,7 @@ function App() {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `orders_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = filename;
     link.click();
   };
 
@@ -389,8 +599,17 @@ function App() {
     }
   };
 
-  const filterOrders = (orders, clientFilter, statusFilter, dateRangeType, customStart, customEnd, slaFilter) => {
+  const filterOrders = (orders, clientFilter, statusFilter, dateRangeType, customStart, customEnd, slaFilter, searchTerm) => {
     return orders.filter(order => {
+      // Search filter
+      if (searchTerm && searchTerm.trim() !== '') {
+        const searchLower = searchTerm.toLowerCase().trim();
+        const orderNumber = (order.order_number || '').toLowerCase();
+        if (!orderNumber.includes(searchLower)) {
+          return false;
+        }
+      }
+
       // Client filter
       if (clientFilter !== 'all' && order.account_uuid !== clientFilter) {
         return false;
@@ -426,10 +645,11 @@ function App() {
     ordersToShipToday,
     selectedClient,
     selectedStatus,
-    dateRange,
-    customStartDate,
-    customEndDate,
-    'all'
+    'all',
+    null,
+    null,
+    'all',
+    todayOrderSearch
   );
 
   const filteredAllOrders = filterOrders(
@@ -439,102 +659,8 @@ function App() {
     allOrdersDateRange,
     allOrdersCustomStartDate,
     allOrdersCustomEndDate,
-    allOrdersSLAMet
-  );
-
-  const FilterSection = ({ 
-    clientValue, 
-    onClientChange, 
-    statusValue, 
-    onStatusChange,
-    dateRangeValue,
-    onDateRangeChange,
-    customStart,
-    onCustomStartChange,
-    customEnd,
-    onCustomEndChange,
-    slaValue,
-    onSLAChange,
-    showSLA = false
-  }) => (
-    <div className="p-4 border-b">
-      <div className="flex flex-wrap gap-4">
-        <div className="flex-1 min-w-[200px]">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Client</label>
-          <select
-            value={clientValue}
-            onChange={(e) => onClientChange(e.target.value)}
-            className="w-full border rounded px-2 py-1"
-          >
-            <option value="all">All Clients</option>
-            {uniqueClients.map(client => (
-              <option key={client.value} value={client.value}>{client.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="flex-1 min-w-[200px]">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-          <select
-            value={statusValue}
-            onChange={(e) => onStatusChange(e.target.value)}
-            className="w-full border rounded px-2 py-1"
-          >
-            {statusOptions.map(status => (
-              <option key={status.value} value={status.value}>{status.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="flex-1 min-w-[200px]">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Date Range</label>
-          <select
-            value={dateRangeValue}
-            onChange={(e) => onDateRangeChange(e.target.value)}
-            className="w-full border rounded px-2 py-1"
-          >
-            <option value="all">All Time</option>
-            {dateRangeOptions.map(option => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </div>
-        {dateRangeValue === 'custom' && (
-          <div className="flex gap-4 flex-1 min-w-[400px]">
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-              <input
-                type="date"
-                value={customStart}
-                onChange={(e) => onCustomStartChange(e.target.value)}
-                className="w-full border rounded px-2 py-1"
-              />
-            </div>
-            <div className="flex-1">
-              <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => onCustomEndChange(e.target.value)}
-                className="w-full border rounded px-2 py-1"
-              />
-            </div>
-          </div>
-        )}
-        {showSLA && (
-          <div className="flex-1 min-w-[200px]">
-            <label className="block text-sm font-medium text-gray-700 mb-1">SLA Status</label>
-            <select
-              value={slaValue}
-              onChange={(e) => onSLAChange(e.target.value)}
-              className="w-full border rounded px-2 py-1"
-            >
-              {slaOptions.map(option => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </div>
-        )}
-      </div>
-    </div>
+    allOrdersSLAMet,
+    allOrdersSearch
   );
 
   const getHourlyShippingData = () => {
@@ -591,93 +717,333 @@ function App() {
     
     // If it's a string in ShipHero format (YYYY-MM-DD HH:MM:SS)
     if (typeof timestamp === 'string' && timestamp.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)) {
-      // Append EST timezone to the string
-      return new Date(timestamp + ' GMT-0400');
+      // ShipHero sends timestamps in UTC, so append UTC timezone
+      return new Date(timestamp + ' UTC');
     }
     
-    // Fallback for any other format
+    // Fallback for any other format - assume UTC if no timezone specified
     return new Date(timestamp);
   };
 
   const verifyOrderWithGraphQL = async (orderNumber) => {
     try {
-      const response = await fetch('https://api.shiphero.com/graphql', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer YOUR_TOKEN_HERE'  // You'll need to replace this with your actual token
-        },
-        body: JSON.stringify({
-          query: `
-            query {
-              orders(order_number: "${orderNumber}") {
-                data {
-                  edges {
-                    node {
-                      fulfillment_status
-                      shipments {
-                        created_date
-                      }
+      const queryBody = {
+        query: `
+          query {
+            orders(order_number: "${orderNumber}") {
+              data {
+                edges {
+                  node {
+                    fulfillment_status
+                    shipments {
+                      created_date
+                    }
+                    allocations {
+                      ready_to_ship
                     }
                   }
                 }
               }
             }
-          `
-        })
+          }
+        `
+      };
+
+      console.log('🔍 Sending GraphQL query for order:', orderNumber);
+      console.log('📤 Query:', JSON.stringify(queryBody, null, 2));
+
+      const response = await fetch('https://public-api.shiphero.com/graphql', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer 3cedf16a-9d42-4ed4-9e6c-e8f850f3b2e3'
+        },
+        body: JSON.stringify(queryBody)
       });
 
       const data = await response.json();
+      console.log('📥 Response for order', orderNumber + ':', JSON.stringify(data, null, 2));
+
+      if (data.errors) {
+        console.error('❌ GraphQL Errors for order', orderNumber + ':', data.errors);
+        setRefreshLog(prev => [...prev, `❌ Order ${orderNumber}: GraphQL Error - ${data.errors[0]?.message || 'Unknown error'}`]);
+        return null;
+      }
+
+      if (!data?.data?.orders?.data?.edges?.[0]?.node) {
+        console.warn('⚠️ No data found for order', orderNumber);
+        setRefreshLog(prev => [...prev, `⚠️ Order ${orderNumber}: No data returned from ShipHero`]);
+        return null;
+      }
+
+      console.log('✅ Successfully processed order:', orderNumber);
       return data?.data?.orders?.data?.edges?.[0]?.node;
     } catch (error) {
-      console.error(`Error verifying order ${orderNumber}:`, error);
+      console.error(`❌ Error verifying order ${orderNumber}:`, error);
+      setRefreshLog(prev => [...prev, `❌ Order ${orderNumber}: ${error.message}`]);
       return null;
     }
   };
 
-  const processOrders = async (ordersToProcess) => {
+  const processOrders = async (ordersToProcess, notReadyOrders) => {
     setIsRefreshing(true);
-    const updatedOrders = [...orders];
+    setRefreshProgress({ current: 0, total: ordersToProcess.length + (notReadyOrders?.length || 0) });
+    setRefreshLog([`Starting refresh of ${ordersToProcess.length + (notReadyOrders?.length || 0)} orders...`]);
 
-    for (const order of ordersToProcess) {
-      const result = await verifyOrderWithGraphQL(order.order_number);
-      
-      if (result) {
-        // Find the order in our local state
-        const orderIndex = updatedOrders.findIndex(o => o.order_number === order.order_number);
-        if (orderIndex === -1) continue;
+    try {
+      const chunkSize = 25; // Process 25 orders at a time
+      const allResults = [];
+      let totalProcessed = 0;
 
-        // Update based on fulfillment status
-        if (result.fulfillment_status === 'fulfilled' || result.fulfillment_status === 'cancelled') {
-          // Update the status in both tables
-          updatedOrders[orderIndex] = {
-            ...updatedOrders[orderIndex],
-            status: result.fulfillment_status === 'fulfilled' ? 'shipped' : 'cancelled'
-          };
+      // Process regular orders in chunks
+      for (let i = 0; i < ordersToProcess.length; i += chunkSize) {
+        const chunk = ordersToProcess.slice(i, i + chunkSize);
+        const chunkNumber = Math.floor(i / chunkSize) + 1;
+        const totalChunks = Math.ceil(ordersToProcess.length / chunkSize);
+        
+        setRefreshLog(prev => [...prev, `📦 Processing chunk ${chunkNumber}/${totalChunks} (${chunk.length} orders)...`]);
+
+        try {
+          const response = await fetch('https://us-central1-superheroboardv2.cloudfunctions.net/verifyOrders', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              ordersToVerify: chunk,
+              notReadyOrders: [] // Process these separately
+            })
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
+          }
+
+          const data = await response.json();
+
+          if (!data.success) {
+            throw new Error(data.error || 'Failed to verify chunk');
+          }
+
+          // Process results and update progress
+          for (const result of data.results) {
+            totalProcessed++;
+            setRefreshProgress({ current: totalProcessed, total: ordersToProcess.length + (notReadyOrders?.length || 0) });
+            
+            if (result.status === 'success') {
+              if (result.changes) {
+                const changes = Object.entries(result.changes)
+                  .filter(([key]) => !['lastVerified', 'updatedAt'].includes(key))
+                  .map(([key, value]) => `${key}: ${value}`)
+                  .join(', ');
+                setRefreshLog(prev => [...prev, `✅ Order ${result.order_number}: Updated (${changes})`]);
+              } else {
+                setRefreshLog(prev => [...prev, `ℹ️ Order ${result.order_number}: No changes needed`]);
+              }
+            } else {
+              setRefreshLog(prev => [...prev, `❌ Order ${result.order_number}: ${result.message}`]);
+            }
+          }
+
+          allResults.push(...data.results);
+          setRefreshLog(prev => [...prev, `✅ Completed chunk ${chunkNumber}/${totalChunks} in ${data.totalTime?.toFixed(1)}s`]);
+
+          // Small delay between chunks to prevent overwhelming the API
+          if (i + chunkSize < ordersToProcess.length) {
+            setRefreshLog(prev => [...prev, `⏰ Waiting 2 seconds before next chunk...`]);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+
+        } catch (chunkError) {
+          setRefreshLog(prev => [...prev, `❌ Error processing chunk ${chunkNumber}: ${chunkError.message}`]);
+          // Continue with next chunk even if one fails
         }
-
-        // Update shipped at time if available
-        if (result.shipments?.[0]?.created_date) {
-          updatedOrders[orderIndex].shippedAt = result.shipments[0].created_date;
-        }
-
-        // Update Firestore
-        const docRef = doc(db, 'orders', order.id);
-        await updateDoc(docRef, {
-          status: updatedOrders[orderIndex].status,
-          shippedAt: updatedOrders[orderIndex].shippedAt
-        });
-
-        // Update local state after each order
-        setOrders([...updatedOrders]);
       }
 
-      // Wait 1 second before next query
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+      // Process not-ready orders in chunks
+      if (notReadyOrders && notReadyOrders.length > 0) {
+        setRefreshLog(prev => [...prev, `🔄 Processing ${notReadyOrders.length} not-ready orders...`]);
+        
+        for (let i = 0; i < notReadyOrders.length; i += chunkSize) {
+          const chunk = notReadyOrders.slice(i, i + chunkSize);
+          const chunkNumber = Math.floor(i / chunkSize) + 1;
+          const totalChunks = Math.ceil(notReadyOrders.length / chunkSize);
+          
+          setRefreshLog(prev => [...prev, `📦 Processing not-ready chunk ${chunkNumber}/${totalChunks} (${chunk.length} orders)...`]);
 
-    setIsRefreshing(false);
-    setIsRefreshConfirming(false);
+          try {
+            const response = await fetch('https://us-central1-superheroboardv2.cloudfunctions.net/verifyOrders', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                ordersToVerify: [],
+                notReadyOrders: chunk
+              })
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+
+            if (!data.success) {
+              throw new Error(data.error || 'Failed to verify chunk');
+            }
+
+            // Process results and update progress
+            for (const result of data.results) {
+              totalProcessed++;
+              setRefreshProgress({ current: totalProcessed, total: ordersToProcess.length + (notReadyOrders?.length || 0) });
+              
+              if (result.status === 'success') {
+                setRefreshLog(prev => [...prev, `✅ Order ${result.order_number}: ${result.message}`]);
+              } else {
+                setRefreshLog(prev => [...prev, `❌ Order ${result.order_number}: ${result.message}`]);
+              }
+            }
+
+            allResults.push(...data.results);
+            setRefreshLog(prev => [...prev, `✅ Completed not-ready chunk ${chunkNumber}/${totalChunks} in ${data.totalTime?.toFixed(1)}s`]);
+
+            // Small delay between chunks
+            if (i + chunkSize < notReadyOrders.length) {
+              setRefreshLog(prev => [...prev, `⏰ Waiting 2 seconds before next chunk...`]);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+          } catch (chunkError) {
+            setRefreshLog(prev => [...prev, `❌ Error processing not-ready chunk ${chunkNumber}: ${chunkError.message}`]);
+          }
+        }
+      }
+
+      const successCount = allResults.filter(r => r.status === 'success' && r.changes).length;
+      const errorCount = allResults.filter(r => r.status === 'error').length;
+      
+      setRefreshLog(prev => [...prev, `✨ Refresh complete! Updated ${successCount} orders, ${errorCount} errors.`]);
+
+    } catch (error) {
+      console.error('💥 Error processing orders:', error);
+      setRefreshLog(prev => [...prev, `❌ Error during refresh: ${error.message}`]);
+    } finally {
+      setIsRefreshing(false);
+      setIsRefreshConfirming(false);
+      setRefreshProgress({ current: 0, total: 0 });
+    }
+  };
+
+  // Function to get shipping volume trends
+  const getShippingTrends = () => {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+    
+    // Filter orders from last 30 days
+    const recentOrders = orders.filter(order => {
+      if (!order.shippedAt) return false;
+      const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+      return shippedDate >= thirtyDaysAgo;
+    });
+
+    if (trendTimeframe === 'daily') {
+      // Group by day
+      const dailyData = {};
+      recentOrders.forEach(order => {
+        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+        const dateKey = shippedDate.toISOString().split('T')[0];
+        dailyData[dateKey] = (dailyData[dateKey] || 0) + 1;
+      });
+
+      // Convert to array and fill in missing days
+      const data = [];
+      let currentDate = new Date(thirtyDaysAgo);
+      let totalOrders = 0;
+      let daysWithOrders = 0;
+      
+      while (currentDate <= now) {
+        const dateKey = currentDate.toISOString().split('T')[0];
+        const orderCount = dailyData[dateKey] || 0;
+        if (orderCount > 0) {
+          totalOrders += orderCount;
+          daysWithOrders++;
+        }
+        data.push({
+          date: dateKey,
+          orders: orderCount,
+          average: totalOrders / Math.max(daysWithOrders, 1)
+        });
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+      return { data, average: totalOrders / Math.max(daysWithOrders, 1) };
+    } else if (trendTimeframe === 'weekly') {
+      // Group by week
+      const weeklyData = {};
+      recentOrders.forEach(order => {
+        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+        const weekStart = new Date(shippedDate);
+        weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Start of week (Sunday)
+        const weekKey = weekStart.toISOString().split('T')[0];
+        weeklyData[weekKey] = (weeklyData[weekKey] || 0) + 1;
+      });
+
+      // Convert to array and fill in missing weeks
+      const data = [];
+      let currentDate = new Date(thirtyDaysAgo);
+      currentDate.setDate(currentDate.getDate() - currentDate.getDay()); // Start at beginning of week
+      let totalOrders = 0;
+      let weeksWithOrders = 0;
+
+      while (currentDate <= now) {
+        const weekKey = currentDate.toISOString().split('T')[0];
+        const orderCount = weeklyData[weekKey] || 0;
+        if (orderCount > 0) {
+          totalOrders += orderCount;
+          weeksWithOrders++;
+        }
+        data.push({
+          date: `Week of ${new Date(weekKey).toLocaleDateString()}`,
+          orders: orderCount,
+          average: totalOrders / Math.max(weeksWithOrders, 1)
+        });
+        currentDate.setDate(currentDate.getDate() + 7);
+      }
+      return { data, average: totalOrders / Math.max(weeksWithOrders, 1) };
+    } else {
+      // Group by month
+      const monthlyData = {};
+      recentOrders.forEach(order => {
+        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+        const monthKey = shippedDate.toISOString().slice(0, 7); // YYYY-MM
+        monthlyData[monthKey] = (monthlyData[monthKey] || 0) + 1;
+      });
+
+      // Convert to array and fill in missing months
+      const data = [];
+      let currentDate = new Date(thirtyDaysAgo);
+      currentDate.setDate(1); // Start at beginning of month
+      let totalOrders = 0;
+      let monthsWithOrders = 0;
+
+      while (currentDate <= now) {
+        const monthKey = currentDate.toISOString().slice(0, 7);
+        const orderCount = monthlyData[monthKey] || 0;
+        if (orderCount > 0) {
+          totalOrders += orderCount;
+          monthsWithOrders++;
+        }
+        data.push({
+          date: new Date(currentDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+          orders: orderCount,
+          average: totalOrders / Math.max(monthsWithOrders, 1)
+        });
+        currentDate.setMonth(currentDate.getMonth() + 1);
+      }
+      return { data, average: totalOrders / Math.max(monthsWithOrders, 1) };
+    }
   };
 
   return (
@@ -764,6 +1130,48 @@ function App() {
                 <span>SuperHero Board</span>
               </div>
             </a>
+            <Link 
+              to="/efm-product-sizes" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+                  />
+                </svg>
+                <span>EFM Product Sizes</span>
+              </div>
+            </Link>
+            <a 
+              href="#" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
+                  />
+                </svg>
+                <span>Compliance Board</span>
+              </div>
+            </a>
           </nav>
         </div>
       </div>
@@ -782,23 +1190,26 @@ function App() {
               
               if (!isRefreshConfirming) {
                 setIsRefreshConfirming(true);
-                // Only reset the confirmation state after 5 seconds
+                setRefreshLog([]); // Clear previous logs
                 const timer = setTimeout(() => {
                   setIsRefreshConfirming(false);
-                  setIsRefreshing(false);
                 }, 5000);
-                return () => clearTimeout(timer); // Clean up timer if button is clicked again
-                return;
+                return () => clearTimeout(timer);
               }
               
               // Get orders that need to be shipped today
               const ordersToVerify = orders.filter(order => 
                 needsShippedToday(order.allocated_at) &&
-                !['shipped', 'cancelled', 'cleared', 'deallocated'].includes(order.status) &&
+                !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
                 order.ready_to_ship === true
               );
 
-              processOrders(ordersToVerify);
+              // Get orders from not_ready_to_ship that need to be rechecked
+              const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
+                needsShippedToday(order.allocated_at)
+              );
+
+              processOrders(ordersToVerify, notReadyOrdersToVerify);
             }}
             disabled={isRefreshing}
             className={`absolute top-10 right-0 px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
@@ -825,10 +1236,23 @@ function App() {
                 }
               />
             </svg>
-            {isRefreshing ? 'Refreshing...' : 
-             isRefreshConfirming ? 'Are you sure?' : 
-             'Refresh Orders'}
+            {isRefreshing ? 
+              `Refreshing (${refreshProgress.current}/${refreshProgress.total})` : 
+              isRefreshConfirming ? 'Are you sure?' : 
+              'Refresh Orders'}
           </button>
+          {isRefreshing && refreshLog.length > 0 && (
+            <div className="fixed bottom-4 right-4 w-96 max-h-96 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
+              <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-3">
+                <h3 className="text-white font-semibold">Refresh Progress</h3>
+              </div>
+              <div className="p-4 space-y-2 overflow-y-auto max-h-80">
+                {refreshLog.map((log, index) => (
+                  <div key={index} className="text-sm text-gray-600">{log}</div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col md:flex-row items-start gap-12 mt-10 pt-5">
@@ -839,7 +1263,7 @@ function App() {
               {
                 orders.filter(order =>
                   !needsShippedToday(order.allocated_at) &&
-                  !['shipped', 'cancelled', 'cleared', 'deallocated'].includes(order.status) &&
+                  !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
                   order.ready_to_ship === true
                 ).length
               }
@@ -881,16 +1305,15 @@ function App() {
               <div className="mt-8">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center">
-                    <div className="relative w-[300px]">
-                      <div className="h-[300px]">
+                    <div className="relative w-[300px] h-[300px] p-4">
                         <ResponsiveContainer width="100%" height="100%">
-                          <PieChart>
+                        <PieChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
                             <Pie 
                               data={pieData} 
                               dataKey="value" 
                               nameKey="name" 
-                              outerRadius={150} 
-                              innerRadius={75}
+                            outerRadius={120} 
+                            innerRadius={60}
                               isAnimationActive={true}
                               label={({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
                                 const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
@@ -917,7 +1340,6 @@ function App() {
                             </Pie>
                           </PieChart>
                         </ResponsiveContainer>
-                      </div>
                     </div>
                     <div className="flex flex-col items-start gap-6 ml-8">
                       <div className="flex items-center gap-3">
@@ -986,6 +1408,146 @@ function App() {
           </div>
         </div>
 
+        {/* New Shipping Volume Trends Section */}
+        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
+          <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-4 sm:p-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <h2 className="text-xl sm:text-2xl font-bold text-white">Shipping Volume Trends</h2>
+                <p className="text-cyan-100 mt-1 text-sm sm:text-base">Historical shipping volume analysis</p>
+              </div>
+              <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => setTrendTimeframe('daily')}
+                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
+                    trendTimeframe === 'daily'
+                      ? 'bg-white text-cyan-700'
+                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
+                  }`}
+                >
+                  Daily
+                </button>
+                <button
+                  onClick={() => setTrendTimeframe('weekly')}
+                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
+                    trendTimeframe === 'weekly'
+                      ? 'bg-white text-cyan-700'
+                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
+                  }`}
+                >
+                  Weekly
+                </button>
+                <button
+                  onClick={() => setTrendTimeframe('monthly')}
+                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
+                    trendTimeframe === 'monthly'
+                      ? 'bg-white text-cyan-700'
+                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
+                  }`}
+                >
+                  Monthly
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="p-3 sm:p-6">
+            {(() => {
+              const trends = getShippingTrends();
+              const averageText = trendTimeframe === 'daily' ? 'per day' :
+                                trendTimeframe === 'weekly' ? 'per week' : 'per month';
+              
+              return (
+                <>
+                  <div className="mb-4 p-3 sm:p-4 bg-gradient-to-r from-cyan-50 to-teal-50 rounded-lg border border-cyan-100">
+                    <div className="text-base sm:text-lg text-cyan-900">
+                      Average Orders {averageText}:{' '}
+                      <span className="font-bold text-xl sm:text-2xl text-cyan-700 block sm:inline mt-1 sm:mt-0">
+                        {Math.round(trends.average * 10) / 10}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="w-full h-[300px] sm:h-[400px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart
+                        data={trends.data}
+                        margin={{
+                          top: 20,
+                          right: 10,
+                          left: 0,
+                          bottom: 60,
+                        }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                        <XAxis 
+                          dataKey="date"
+                          stroke="#6B7280"
+                          tick={{ 
+                            fill: '#374151',
+                            fontSize: windowWidth < 640 ? 10 : 12 
+                          }}
+                          tickLine={{ stroke: '#6B7280' }}
+                          angle={-45}
+                          textAnchor="end"
+                          height={60}
+                          interval={windowWidth < 640 ? 1 : 0}
+                        />
+                        <YAxis
+                          stroke="#6B7280"
+                          tick={{ 
+                            fill: '#374151',
+                            fontSize: windowWidth < 640 ? 10 : 12
+                          }}
+                          tickLine={{ stroke: '#6B7280' }}
+                          width={windowWidth < 640 ? 30 : 40}
+                        />
+                        <Tooltip 
+                          content={({ active, payload, label }) => {
+                            if (active && payload && payload.length) {
+                              return (
+                                <div className="bg-white p-2 sm:p-4 shadow-lg rounded-lg border border-gray-200 text-sm sm:text-base">
+                                  <p className="text-gray-600">{label}</p>
+                                  <p className="text-cyan-600 font-bold">{`Orders: ${payload[0].value}`}</p>
+                                  <p className="text-teal-600">{`Avg: ${Math.round(payload[1].value * 10) / 10}`}</p>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                          wrapperStyle={{ zIndex: 1000 }}
+                        />
+                        <Legend 
+                          wrapperStyle={{
+                            fontSize: windowWidth < 640 ? '0.75rem' : '0.875rem',
+                            marginTop: '0.5rem'
+                          }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="orders"
+                          name="Orders"
+                          stroke="#0891b2"
+                          strokeWidth={2}
+                          dot={{ fill: '#0891b2', strokeWidth: 1, r: windowWidth < 640 ? 2 : 3 }}
+                          activeDot={{ r: windowWidth < 640 ? 6 : 8 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="average"
+                          name="Avg"
+                          stroke="#0d9488"
+                          strokeWidth={2}
+                          strokeDasharray="5 5"
+                          dot={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+
         <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
           <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
             <div className="flex justify-between items-start">
@@ -994,7 +1556,7 @@ function App() {
                 <p className="text-blue-100 mt-1">Who needs a subtitle for a table?</p>
               </div>
               <button 
-                onClick={exportToCSV}
+                onClick={() => exportToCSV(filteredTodayOrders, `orders_to_ship_today_${new Date().toISOString().split('T')[0]}.csv`)}
                 className="bg-white text-blue-700 hover:bg-blue-50 px-4 py-2 rounded-lg shadow-sm transition-colors duration-150 flex items-center space-x-2"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1015,7 +1577,18 @@ function App() {
             onCustomStartChange={setCustomStartDate}
             customEnd={customEndDate}
             onCustomEndChange={setCustomEndDate}
+            slaValue={'all'}
+            onSLAChange={() => {}}
             showSLA={false}
+            searchValue={todayOrderSearch}
+            onSearchChange={setTodayOrderSearch}
+            searchInputValue={todayOrderSearchInput}
+            onSearchInputChange={setTodayOrderSearchInput}
+            searchPlaceholder="Search by order number..."
+            uniqueClients={uniqueClients}
+            statusOptions={statusOptions}
+            dateRangeOptions={dateRangeOptions}
+            slaOptions={slaOptions}
           />
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm divide-y divide-gray-200">
@@ -1121,7 +1694,7 @@ function App() {
                 <p className="text-purple-100 mt-1">Complete overview of your order history</p>
               </div>
               <button 
-                onClick={exportToCSV}
+                onClick={() => exportToCSV(filteredAllOrders, `all_orders_${new Date().toISOString().split('T')[0]}.csv`)}
                 className="bg-white text-purple-700 hover:bg-purple-50 px-4 py-2 rounded-lg shadow-sm transition-colors duration-150 flex items-center space-x-2"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1145,6 +1718,15 @@ function App() {
             slaValue={allOrdersSLAMet}
             onSLAChange={setAllOrdersSLAMet}
             showSLA={true}
+            searchValue={allOrdersSearch}
+            onSearchChange={setAllOrdersSearch}
+            searchInputValue={allOrdersSearchInput}
+            onSearchInputChange={setAllOrdersSearchInput}
+            searchPlaceholder="Search by order number..."
+            uniqueClients={uniqueClients}
+            statusOptions={statusOptions}
+            dateRangeOptions={dateRangeOptions}
+            slaOptions={slaOptions}
           />
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm divide-y divide-gray-200">
@@ -1181,7 +1763,7 @@ function App() {
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
                         order.status === 'shipped' ? 'bg-green-100 text-green-800' :
-                        order.status === 'cancelled' ? 'bg-red-100 text-red-800' :
+                        order.status === 'canceled' ? 'bg-red-100 text-red-800' :
                         order.status === 'allocated' ? 'bg-yellow-100 text-yellow-800' :
                         order.status === 'cleared' ? 'bg-gray-100 text-gray-800' :
                         'bg-teal-100 text-teal-800'
@@ -1281,8 +1863,116 @@ function App() {
             setPageSize={setPageSize}
           />
         </div>
+
+        {/* Add Not Ready to Ship Orders Section */}
+        {notReadyToShipOrders.length > 0 && (
+          <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
+            <div className="bg-gradient-to-r from-pink-400 to-pink-600 p-6">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Not Ready to Ship</h2>
+                  <p className="text-pink-100 mt-1">Orders removed from "Ship Today" due to ready_to_ship status change</p>
+                </div>
+                <button 
+                  onClick={() => exportToCSV(notReadyToShipOrders, `not_ready_to_ship_${new Date().toISOString().split('T')[0]}.csv`)}
+                  className="bg-white text-pink-700 hover:bg-pink-50 px-4 py-2 rounded-lg shadow-sm transition-colors duration-150 flex items-center space-x-2"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <span>Export to CSV</span>
+                </button>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Order #</th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Line Items</th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocated At</th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Removed At</th>
+                    <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {notReadyToShipOrders.map((order, idx) => (
+                    <tr 
+                      key={order.id} 
+                      className={`
+                        ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
+                        hover:bg-pink-50 transition-colors duration-150 ease-in-out
+                      `}
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-pink-600">{order.order_number}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{accountMap[order.account_uuid] || order.account_uuid || 'Unknown'}</td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-pink-100 text-pink-800">
+                          {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {(() => { 
+                          try { 
+                            if (!order.allocated_at) return '—'; 
+                            const date = parseShipHeroTimestamp(order.allocated_at);
+                            return new Intl.DateTimeFormat('en-US', {
+                              timeZone: 'America/New_York',
+                              year: 'numeric',
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: true
+                            }).format(date);
+                          } catch { 
+                            return '—'; 
+                          } 
+                        })()}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {(() => { 
+                          try { 
+                            if (!order.removed_at) return '—'; 
+                            const date = order.removed_at.toDate();
+                            return new Intl.DateTimeFormat('en-US', {
+                              timeZone: 'America/New_York',
+                              year: 'numeric',
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: true
+                            }).format(date);
+                          } catch { 
+                            return '—'; 
+                          } 
+                        })()}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {order.reason || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/efm-product-sizes" element={<EFMProductSizes />} />
+    </Routes>
   );
 }
 
