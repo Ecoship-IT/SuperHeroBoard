@@ -231,6 +231,56 @@ exports.shipHeroWebhook = functions.https.onRequest((req, res) => {
   });
 });
 
+const calculateRequiredShipDate = (allocatedAt) => {
+  if (!allocatedAt) return null;
+  
+  // Parse the allocated date
+  const alloc = new Date(allocatedAt);
+  
+  // Work entirely in UTC to avoid timezone conversion issues
+  const allocUTC = new Date(alloc);
+  
+  // Check if we're in DST (same logic as frontend)
+  const year = allocUTC.getUTCFullYear();
+  const isDST = (date) => {
+    const jan = new Date(year, 0, 1).getTimezoneOffset();
+    const jul = new Date(year, 6, 1).getTimezoneOffset();
+    return Math.max(jan, jul) !== date.getTimezoneOffset();
+  };
+  
+  // Create cutoff: 8 AM Eastern = 12 UTC (DST) or 13 UTC (EST)
+  const cutoffHourUTC = isDST(new Date()) ? 12 : 13;
+  const cutoffUTC = new Date(allocUTC);
+  cutoffUTC.setUTCHours(cutoffHourUTC, 0, 0, 0);
+  
+  const isBeforeCutoff = allocUTC < cutoffUTC;
+  let shipDate = new Date(allocUTC);
+  if (!isBeforeCutoff) {
+    shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+  }
+  
+  // Skip weekends
+  while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+    shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+  }
+  
+  return shipDate;
+};
+
+const needsShippedToday = (allocatedAt) => {
+  if (!allocatedAt) return false;
+  
+  const requiredShipDate = calculateRequiredShipDate(allocatedAt);
+  if (!requiredShipDate) return false;
+  
+  // Compare just the date portion (UTC)
+  const today = new Date();
+  const shipDateStr = requiredShipDate.toISOString().split('T')[0];
+  const todayStr = today.toISOString().split('T')[0];
+  
+  return shipDateStr === todayStr;
+};
+
 const verifyOrderWithGraphQL = async (orderNumber, retryCount = 0) => {
   try {
     const response = await fetch('https://public-api.shiphero.com/graphql', {
@@ -253,6 +303,7 @@ const verifyOrderWithGraphQL = async (orderNumber, retryCount = 0) => {
                     allocations {
                       ready_to_ship
                     }
+                    required_ship_date
                   }
                 }
               }
@@ -450,12 +501,24 @@ exports.verifyOrders = functions
               let changed = false;
 
               // Update based on fulfillment status
-              if (result.fulfillment_status === 'fulfilled' || result.fulfillment_status === 'canceled') {
-                const newStatus = result.fulfillment_status === 'fulfilled' ? 'shipped' : 'canceled';
+              if (result.fulfillment_status === 'fulfilled' || result.fulfillment_status === 'canceled' || result.fulfillment_status === 'wholesale') {
+                let newStatus;
+                if (result.fulfillment_status === 'fulfilled') {
+                  newStatus = 'shipped';
+                } else if (result.fulfillment_status === 'canceled') {
+                  newStatus = 'canceled';
+                } else if (result.fulfillment_status === 'wholesale') {
+                  newStatus = 'wholesale';
+                }
+                
                 if (orderData.status !== newStatus) {
                   console.log(`📝 Order ${order.order_number}: Status ${orderData.status} -> ${newStatus}`);
                   updates.status = newStatus;
                   changed = true;
+                  
+                  if (newStatus === 'wholesale') {
+                    console.log(`🏢 Order ${order.order_number}: Marked as wholesale - will be removed from ship today list`);
+                  }
                 }
               }
 
@@ -464,6 +527,46 @@ exports.verifyOrders = functions
                 console.log(`📅 Order ${order.order_number}: Adding shipping date`);
                 updates.shippedAt = result.shipments[0].created_date;
                 changed = true;
+              }
+
+              // Check and update required ship date from ShipHero if available
+              if (result.required_ship_date && orderData.allocated_at) {
+                // Parse the ShipHero required ship date
+                const shipHeroRequiredDate = new Date(result.required_ship_date);
+                
+                // Calculate our required ship date from allocated_at
+                const calculatedDate = calculateRequiredShipDate(orderData.allocated_at);
+                
+                if (calculatedDate) {
+                  // Compare dates (just the date portion, not time)
+                  const shipHeroDateStr = shipHeroRequiredDate.toISOString().split('T')[0];
+                  const calculatedDateStr = calculatedDate.toISOString().split('T')[0];
+                  
+                  if (shipHeroDateStr !== calculatedDateStr) {
+                    console.log(`📅 Order ${order.order_number}: Required ship date differs`);
+                    console.log(`   Our calculation: ${calculatedDateStr}`);
+                    console.log(`   ShipHero date: ${shipHeroDateStr}`);
+                    console.log(`   Using ShipHero date as override`);
+                    
+                    // Store the ShipHero required ship date as an override
+                    updates.required_ship_date_override = result.required_ship_date;
+                    updates.required_ship_date_source = 'shiphero';
+                    changed = true;
+                    
+                    // Check if this affects "ship today" status
+                    const today = new Date();
+                    const todayStr = today.toISOString().split('T')[0];
+                    const wasShipToday = needsShippedToday(orderData.allocated_at);
+                    const isNowShipToday = shipHeroDateStr === todayStr;
+                    
+                    if (wasShipToday !== isNowShipToday) {
+                      console.log(`🔄 Order ${order.order_number}: Ship today status changed from ${wasShipToday} to ${isNowShipToday}`);
+                      updates.ship_today_override = isNowShipToday;
+                    }
+                  }
+                } else {
+                  console.log(`⚠️ Order ${order.order_number}: Could not calculate required ship date from allocated_at`);
+                }
               }
 
               // Check ready_to_ship status
@@ -560,17 +663,60 @@ exports.verifyOrders = functions
                   // Remove from not_ready_to_ship collection
                   await db.collection('not_ready_to_ship').doc(order.order_number).delete();
 
-                  // Update the order in the main orders collection
-                  await db.collection('orders').doc(order.order_number).update({
+                  // Prepare updates for the main orders collection
+                  const updates = {
                     ready_to_ship: true,
                     lastVerified: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                  });
+                  };
+
+                  // Check and update required ship date from ShipHero if available
+                  if (result.required_ship_date && order.allocated_at) {
+                    // Parse the ShipHero required ship date
+                    const shipHeroRequiredDate = new Date(result.required_ship_date);
+                    
+                    // Calculate our required ship date from allocated_at
+                    const calculatedDate = calculateRequiredShipDate(order.allocated_at);
+                    
+                    if (calculatedDate) {
+                      // Compare dates (just the date portion, not time)
+                      const shipHeroDateStr = shipHeroRequiredDate.toISOString().split('T')[0];
+                      const calculatedDateStr = calculatedDate.toISOString().split('T')[0];
+                      
+                      if (shipHeroDateStr !== calculatedDateStr) {
+                        console.log(`📅 Order ${order.order_number}: Required ship date differs`);
+                        console.log(`   Our calculation: ${calculatedDateStr}`);
+                        console.log(`   ShipHero date: ${shipHeroDateStr}`);
+                        console.log(`   Using ShipHero date as override`);
+                        
+                        // Store the ShipHero required ship date as an override
+                        updates.required_ship_date_override = result.required_ship_date;
+                        updates.required_ship_date_source = 'shiphero';
+                        
+                        // Check if this affects "ship today" status
+                        const today = new Date();
+                        const todayStr = today.toISOString().split('T')[0];
+                        const wasShipToday = needsShippedToday(order.allocated_at);
+                        const isNowShipToday = shipHeroDateStr === todayStr;
+                        
+                        if (wasShipToday !== isNowShipToday) {
+                          console.log(`🔄 Order ${order.order_number}: Ship today status changed from ${wasShipToday} to ${isNowShipToday}`);
+                          updates.ship_today_override = isNowShipToday;
+                        }
+                      }
+                    } else {
+                      console.log(`⚠️ Order ${order.order_number}: Could not calculate required ship date from allocated_at`);
+                    }
+                  }
+
+                  // Update the order in the main orders collection
+                  await db.collection('orders').doc(order.order_number).update(updates);
 
                   batchResults.push({
                     order_number: order.order_number,
                     status: 'success',
-                    message: 'Order is now ready to ship'
+                    message: 'Order is now ready to ship',
+                    changes: updates
                   });
                 } else {
                   console.log(`⏸️ Order ${order.order_number} is still not ready to ship`);

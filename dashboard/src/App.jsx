@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useCallback, memo } from 'react';
 import { Routes, Route, Link, useNavigate } from 'react-router-dom';
 import { db } from './firebase';
 import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
@@ -198,6 +198,9 @@ function Dashboard() {
   // Add new state for trend view
   const [trendTimeframe, setTrendTimeframe] = useState('daily'); // 'daily', 'weekly', 'monthly'
 
+  // State for manual completion confirmation
+  const [confirmingManual, setConfirmingManual] = useState(null); // orderNumber being confirmed
+
   const pageSizeOptions = [25, 50, 100, 250, 500];
   const dateRangeOptions = [
     { value: 'today', label: 'Today' },
@@ -212,7 +215,9 @@ function Dashboard() {
     { value: 'shipped', label: 'Shipped' },
     { value: 'canceled', label: 'Canceled' },
     { value: 'cleared', label: 'Cleared' },
-    { value: 'deallocated', label: 'Deallocated' }
+    { value: 'deallocated', label: 'Deallocated' },
+    { value: 'wholesale', label: 'Wholesale' },
+    { value: 'manual', label: 'Manual' }
   ];
 
   const slaOptions = [
@@ -303,59 +308,102 @@ function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  const needsShippedToday = (allocatedAt) => {
+  const needsShippedToday = (order) => {
+    // Check for ShipHero override first
+    if (order && typeof order === 'object' && order.ship_today_override !== undefined) {
+      return order.ship_today_override;
+    }
+
+    // Fall back to allocated_at calculation
+    const allocatedAt = order && typeof order === 'object' ? order.allocated_at : order;
     if (!allocatedAt) return false;
+    
     const alloc = allocatedAt.toDate ? allocatedAt.toDate() : new Date(allocatedAt);
     
-    // Convert allocation time to Eastern Time
-    const allocEastern = new Date(alloc.toLocaleString("en-US", {timeZone: "America/New_York"}));
+    // Work entirely in UTC to avoid timezone conversion issues
+    const allocUTC = new Date(alloc);
     
-    // Get current date in Eastern Time
-    const nowEastern = new Date(new Date().toLocaleString("en-US", {timeZone: "America/New_York"}));
+    // Get the date in Eastern time for determining the cutoff
+    // 8 AM EST = 13:00 UTC (during EST months Nov-Mar)
+    // 8 AM EDT = 12:00 UTC (during EDT months Mar-Nov)
+    // We'll check if we're in DST using a reliable method
+    const year = allocUTC.getUTCFullYear();
+    const isDST = (date) => {
+      const jan = new Date(year, 0, 1).getTimezoneOffset();
+      const jul = new Date(year, 6, 1).getTimezoneOffset();
+      return Math.max(jan, jul) !== date.getTimezoneOffset();
+    };
     
-    // Create cutoff time (8 AM Eastern on the allocation date)
-    const cutoffEastern = new Date(allocEastern);
-    cutoffEastern.setHours(8, 0, 0, 0);
+    // Create cutoff: 8 AM Eastern = 12 UTC (DST) or 13 UTC (EST)
+    const cutoffHourUTC = isDST(new Date()) ? 12 : 13;
+    const cutoffUTC = new Date(allocUTC);
+    cutoffUTC.setUTCHours(cutoffHourUTC, 0, 0, 0);
     
-    const isBeforeCutoff = allocEastern < cutoffEastern;
-    let shipDate = new Date(allocEastern);
-    if (!isBeforeCutoff) shipDate.setDate(shipDate.getDate() + 1);
-    
-    // Skip weekends
-    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) {
-      shipDate.setDate(shipDate.getDate() + 1);
+    const isBeforeCutoff = allocUTC < cutoffUTC;
+    let shipDate = new Date(allocUTC);
+    if (!isBeforeCutoff) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     
-    return shipDate.toISOString().split('T')[0] === nowEastern.toISOString().split('T')[0];
+    // Skip weekends
+    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+    }
+    
+    // Compare just the date portion (UTC)
+    const today = new Date();
+    const shipDateStr = shipDate.toISOString().split('T')[0];
+    const todayStr = today.toISOString().split('T')[0];
+    
+    return shipDateStr === todayStr;
   };
 
-  const getRequiredShipDate = (allocatedAt) => {
+  const getRequiredShipDate = (order) => {
+    // Check for ShipHero override first
+    if (order && typeof order === 'object' && order.required_ship_date_override) {
+      return new Date(order.required_ship_date_override);
+    }
+
+    // Fall back to allocated_at calculation
+    const allocatedAt = order && typeof order === 'object' ? order.allocated_at : order;
     if (!allocatedAt) return null;
+    
     const alloc = allocatedAt.toDate ? allocatedAt.toDate() : new Date(allocatedAt);
     
-    // Convert allocation time to Eastern Time
-    const allocEastern = new Date(alloc.toLocaleString("en-US", {timeZone: "America/New_York"}));
+    // Work entirely in UTC to avoid timezone conversion issues
+    const allocUTC = new Date(alloc);
     
-    // Create cutoff time (8 AM Eastern on the allocation date)
-    const cutoffEastern = new Date(allocEastern);
-    cutoffEastern.setHours(8, 0, 0, 0);
+    // Check if we're in DST (same logic as needsShippedToday)
+    const year = allocUTC.getUTCFullYear();
+    const isDST = (date) => {
+      const jan = new Date(year, 0, 1).getTimezoneOffset();
+      const jul = new Date(year, 6, 1).getTimezoneOffset();
+      return Math.max(jan, jul) !== date.getTimezoneOffset();
+    };
     
-    const isBeforeCutoff = allocEastern < cutoffEastern;
-    let shipDate = new Date(allocEastern);
-    if (!isBeforeCutoff) shipDate.setDate(shipDate.getDate() + 1);
+    // Create cutoff: 8 AM Eastern = 12 UTC (DST) or 13 UTC (EST)
+    const cutoffHourUTC = isDST(new Date()) ? 12 : 13;
+    const cutoffUTC = new Date(allocUTC);
+    cutoffUTC.setUTCHours(cutoffHourUTC, 0, 0, 0);
+    
+    const isBeforeCutoff = allocUTC < cutoffUTC;
+    let shipDate = new Date(allocUTC);
+    if (!isBeforeCutoff) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+    }
     
     // Skip weekends
-    while (shipDate.getDay() === 6 || shipDate.getDay() === 0) {
-      shipDate.setDate(shipDate.getDate() + 1);
+    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     
     return shipDate;
   };
 
-  const checkSLAMet = (shippedAt, allocatedAt) => {
-    if (!shippedAt || !allocatedAt) return false;
+  const checkSLAMet = (shippedAt, order) => {
+    if (!shippedAt || !order) return false;
     const shipped = shippedAt.toDate ? shippedAt.toDate() : new Date(shippedAt);
-    const requiredShipDate = getRequiredShipDate(allocatedAt);
+    const requiredShipDate = getRequiredShipDate(order);
     if (!requiredShipDate) return false;
     
     // Compare dates without time
@@ -365,76 +413,90 @@ function Dashboard() {
     return shippedDate <= requiredDate;
   };
 
-  const ordersToShipToday = orders.filter(
-    order => 
-      needsShippedToday(order.allocated_at) &&
-      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
-      order.ready_to_ship === true
-  );
+  // Memoize expensive computations
+  const ordersToShipToday = useMemo(() => {
+    return orders.filter(
+      order => 
+        needsShippedToday(order) &&
+        !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
+        order.ready_to_ship === true
+    );
+  }, [orders]);
 
-  const shippedToday = orders.filter(order => {
-    if (order.status !== 'shipped' || !order.shippedAt) return false;
-    try {
-      const shipDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-      return shipDate.toDateString() === new Date().toDateString();
-    } catch {
-      return false;
-    }
-  });
-
-  const grouped = {};
-  orders
-    .filter(order => 
-      needsShippedToday(order.allocated_at) &&
-      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
+  const ordersToShipTomorrow = useMemo(() => {
+    return orders.filter(order =>
+      !needsShippedToday(order) &&
+      !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
       order.ready_to_ship === true
-    )
-    .forEach(order => {
+    );
+  }, [orders]);
+
+  const shippedToday = useMemo(() => {
+    const todayString = new Date().toDateString();
+    return orders.filter(order => {
+      if (order.status !== 'shipped' || !order.shippedAt) return false;
+      try {
+        const shipDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+        return shipDate.toDateString() === todayString;
+      } catch {
+        return false;
+      }
+    });
+  }, [orders]);
+
+  const groupedSorted = useMemo(() => {
+    const grouped = {};
+    ordersToShipToday.forEach(order => {
       const name = accountMap[order.account_uuid] || order.account_uuid || 'Unknown';
       grouped[name] = (grouped[name] || 0) + 1;
     });
+    return Object.entries(grouped).sort((a, b) => b[1] - a[1]);
+  }, [ordersToShipToday]);
 
-  const groupedSorted = Object.entries(grouped).sort((a, b) => b[1] - a[1]);
-  const visibleClients = showAllClients ? groupedSorted : groupedSorted.slice(0, 10);
+  const visibleClients = useMemo(() => {
+    return showAllClients ? groupedSorted : groupedSorted.slice(0, 10);
+  }, [groupedSorted, showAllClients]);
 
-  const pieData = [
+  const pieData = useMemo(() => [
     { name: 'Shipped', value: shippedToday.length },
     { name: 'Unshipped', value: ordersToShipToday.length }
-  ];
+  ], [shippedToday.length, ordersToShipToday.length]);
 
   const COLORS = ['#16a34a', '#dc2626'];
 
-  const handleSort = (field) => {
+  const handleSort = useCallback((field) => {
     if (sortField === field) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
       setSortDirection('asc');
     }
-  };
+  }, [sortField, sortDirection]);
 
-  const sortedOrders = [...orders].sort((a, b) => {
-    let aValue, bValue;
+  const sortedOrders = useMemo(() => {
+    return [...orders].sort((a, b) => {
+      let aValue, bValue;
 
-    if (sortField === 'client') {
-      aValue = accountMap[a.account_uuid] || a.account_uuid || 'Unknown';
-      bValue = accountMap[b.account_uuid] || b.account_uuid || 'Unknown';
-    } else if (sortField === 'allocated_at' || sortField === 'shippedAt') {
-      aValue = a[sortField]?.toDate?.() || new Date(a[sortField] || 0);
-      bValue = b[sortField]?.toDate?.() || new Date(b[sortField] || 0);
-    } else {
-      aValue = a[sortField];
-      bValue = b[sortField];
-    }
+      if (sortField === 'client') {
+        aValue = accountMap[a.account_uuid] || a.account_uuid || 'Unknown';
+        bValue = accountMap[b.account_uuid] || b.account_uuid || 'Unknown';
+      } else if (sortField === 'allocated_at' || sortField === 'shippedAt') {
+        aValue = a[sortField]?.toDate?.() || new Date(a[sortField] || 0);
+        bValue = b[sortField]?.toDate?.() || new Date(b[sortField] || 0);
+      } else {
+        aValue = a[sortField];
+        bValue = b[sortField];
+      }
 
-    if (sortDirection === 'asc') {
-      return aValue > bValue ? 1 : -1;
-    } else {
-      return aValue < bValue ? 1 : -1;
-    }
-  });
+      if (sortDirection === 'asc') {
+        return aValue > bValue ? 1 : -1;
+      } else {
+        return aValue < bValue ? 1 : -1;
+      }
+    });
+  }, [orders, sortField, sortDirection]);
 
-  const exportToCSV = (data, filename) => {
+  const exportToCSV = useCallback((data, filename) => {
     const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Shipped At'];
     const csvData = data.map(order => [
       order.order_number,
@@ -454,7 +516,7 @@ function Dashboard() {
     link.href = URL.createObjectURL(blob);
     link.download = filename;
     link.click();
-  };
+  }, []);
 
   const Pagination = ({ total, pageSize, currentPage, setCurrentPage, setPageSize }) => {
     const totalPages = Math.ceil(total / pageSize);
@@ -560,19 +622,21 @@ function Dashboard() {
     );
   };
 
-  const paginateData = (data, pageSize, currentPage) => {
+  const paginateData = useCallback((data, pageSize, currentPage) => {
     const start = (currentPage - 1) * pageSize;
     return data.slice(start, start + pageSize);
-  };
+  }, []);
 
-  const uniqueClients = [...new Set(orders.map(order => order.account_uuid))]
-    .map(uuid => ({
-      value: uuid || 'unknown',
-      label: accountMap[uuid] || uuid || 'Unknown'
-    }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+  const uniqueClients = useMemo(() => {
+    return [...new Set(orders.map(order => order.account_uuid))]
+      .map(uuid => ({
+        value: uuid || 'unknown',
+        label: accountMap[uuid] || uuid || 'Unknown'
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [orders]);
 
-  const getDateRange = (rangeType, customStart = null, customEnd = null) => {
+  const getDateRange = useCallback((rangeType, customStart = null, customEnd = null) => {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     
@@ -597,9 +661,9 @@ function Dashboard() {
       default:
         return { start: null, end: null };
     }
-  };
+  }, []);
 
-  const filterOrders = (orders, clientFilter, statusFilter, dateRangeType, customStart, customEnd, slaFilter, searchTerm) => {
+  const filterOrders = useCallback((orders, clientFilter, statusFilter, dateRangeType, customStart, customEnd, slaFilter, searchTerm) => {
     return orders.filter(order => {
       // Search filter
       if (searchTerm && searchTerm.trim() !== '') {
@@ -623,8 +687,8 @@ function Dashboard() {
       // SLA filter
       if (slaFilter !== 'all') {
         if (slaFilter === 'tbd' && order.shippedAt) return false;
-        if (slaFilter === 'true' && (!order.shippedAt || !checkSLAMet(order.shippedAt, order.allocated_at))) return false;
-        if (slaFilter === 'false' && (!order.shippedAt || checkSLAMet(order.shippedAt, order.allocated_at))) return false;
+        if (slaFilter === 'true' && (!order.shippedAt || !checkSLAMet(order.shippedAt, order))) return false;
+        if (slaFilter === 'false' && (!order.shippedAt || checkSLAMet(order.shippedAt, order))) return false;
       }
 
       // Date filter
@@ -638,32 +702,51 @@ function Dashboard() {
 
       return true;
     });
-  };
+  }, [getDateRange]);
 
-  // Filter the orders
-  const filteredTodayOrders = filterOrders(
-    ordersToShipToday,
-    selectedClient,
-    selectedStatus,
-    'all',
-    null,
-    null,
-    'all',
-    todayOrderSearch
-  );
+  // Memoize filtered orders
+  const filteredTodayOrders = useMemo(() => {
+    return filterOrders(
+      ordersToShipToday,
+      selectedClient,
+      selectedStatus,
+      'all',
+      null,
+      null,
+      'all',
+      todayOrderSearch
+    );
+  }, [ordersToShipToday, selectedClient, selectedStatus, todayOrderSearch]);
 
-  const filteredAllOrders = filterOrders(
-    sortedOrders,
-    allOrdersClient,
-    allOrdersStatus,
-    allOrdersDateRange,
-    allOrdersCustomStartDate,
-    allOrdersCustomEndDate,
-    allOrdersSLAMet,
-    allOrdersSearch
-  );
+  const filteredAllOrders = useMemo(() => {
+    return filterOrders(
+      sortedOrders,
+      allOrdersClient,
+      allOrdersStatus,
+      allOrdersDateRange,
+      allOrdersCustomStartDate,
+      allOrdersCustomEndDate,
+      allOrdersSLAMet,
+      allOrdersSearch
+    );
+  }, [sortedOrders, allOrdersClient, allOrdersStatus, allOrdersDateRange, allOrdersCustomStartDate, allOrdersCustomEndDate, allOrdersSLAMet, allOrdersSearch]);
 
-  const getHourlyShippingData = () => {
+  // Optimize search with debouncing
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setTodayOrderSearch(todayOrderSearchInput);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [todayOrderSearchInput]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAllOrdersSearch(allOrdersSearchInput);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [allOrdersSearchInput]);
+
+  const getHourlyShippingData = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -696,7 +779,7 @@ function Dashboard() {
     });
 
     return hourlyData;
-  };
+  }, [shippedToday]);
 
   const CustomTooltip = ({ active, payload, label }) => {
     if (active && payload && payload.length) {
@@ -710,7 +793,7 @@ function Dashboard() {
     return null;
   };
 
-  const parseShipHeroTimestamp = (timestamp) => {
+  const parseShipHeroTimestamp = useCallback((timestamp) => {
     if (!timestamp) return null;
     // If it's a Firestore timestamp, use toDate()
     if (timestamp.toDate) return timestamp.toDate();
@@ -723,7 +806,41 @@ function Dashboard() {
     
     // Fallback for any other format - assume UTC if no timezone specified
     return new Date(timestamp);
-  };
+  }, []);
+
+  const handleManualComplete = useCallback((orderNumber) => {
+    if (confirmingManual !== orderNumber) {
+      // First click - show confirmation
+      setConfirmingManual(orderNumber);
+      // Auto-reset after 5 seconds
+      setTimeout(() => {
+        setConfirmingManual(null);
+      }, 5000);
+    } else {
+      // Second click - actually complete the order
+      markOrderAsManual(orderNumber);
+      setConfirmingManual(null);
+    }
+  }, [confirmingManual]);
+
+  const markOrderAsManual = useCallback(async (orderNumber) => {
+    try {
+      console.log(`🔧 Marking order ${orderNumber} as manual complete`);
+      
+      // Update the order in Firestore
+      const orderRef = doc(db, 'orders', orderNumber);
+      await updateDoc(orderRef, {
+        status: 'manual',
+        manualCompletedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      
+      console.log(`✅ Successfully marked order ${orderNumber} as manual`);
+    } catch (error) {
+      console.error(`❌ Error marking order ${orderNumber} as manual:`, error);
+      alert(`Error updating order: ${error.message}`);
+    }
+  }, []);
 
   const verifyOrderWithGraphQL = async (orderNumber) => {
     try {
@@ -937,114 +1054,61 @@ function Dashboard() {
     }
   };
 
-  // Function to get shipping volume trends
-  const getShippingTrends = () => {
+  // Simplified and optimized shipping volume trends
+  const getShippingTrends = useMemo(() => {
+    // Only use last 7 days for better performance
     const now = new Date();
-    const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+    const daysAgo = trendTimeframe === 'daily' ? 7 : trendTimeframe === 'weekly' ? 21 : 30;
+    const startDate = new Date(now.getTime() - (daysAgo * 24 * 60 * 60 * 1000));
     
-    // Filter orders from last 30 days
-    const recentOrders = orders.filter(order => {
-      if (!order.shippedAt) return false;
-      const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-      return shippedDate >= thirtyDaysAgo;
+    // Pre-filter shipped orders only
+    const shippedOrders = orders.filter(order => 
+      order.status === 'shipped' && 
+      order.shippedAt
+    );
+
+    // Group orders by time period
+    const grouped = {};
+    let totalOrders = 0;
+    
+    shippedOrders.forEach(order => {
+      try {
+        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
+        if (shippedDate >= startDate) {
+          let key;
+          if (trendTimeframe === 'daily') {
+            key = shippedDate.toISOString().split('T')[0];
+          } else if (trendTimeframe === 'weekly') {
+            const weekStart = new Date(shippedDate);
+            weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+            key = weekStart.toISOString().split('T')[0];
+          } else {
+            key = shippedDate.toISOString().slice(0, 7);
+          }
+          grouped[key] = (grouped[key] || 0) + 1;
+          totalOrders++;
+        }
+      } catch (e) {
+        // Skip invalid dates
+      }
     });
 
-    if (trendTimeframe === 'daily') {
-      // Group by day
-      const dailyData = {};
-      recentOrders.forEach(order => {
-        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        const dateKey = shippedDate.toISOString().split('T')[0];
-        dailyData[dateKey] = (dailyData[dateKey] || 0) + 1;
-      });
+    // Create simplified data array
+    const data = Object.entries(grouped)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, orders]) => ({
+        date: trendTimeframe === 'weekly' ? `Week of ${date}` : 
+              trendTimeframe === 'monthly' ? new Date(date + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : 
+              date,
+        orders,
+        average: totalOrders / Math.max(Object.keys(grouped).length, 1)
+      }));
 
-      // Convert to array and fill in missing days
-      const data = [];
-      let currentDate = new Date(thirtyDaysAgo);
-      let totalOrders = 0;
-      let daysWithOrders = 0;
-      
-      while (currentDate <= now) {
-        const dateKey = currentDate.toISOString().split('T')[0];
-        const orderCount = dailyData[dateKey] || 0;
-        if (orderCount > 0) {
-          totalOrders += orderCount;
-          daysWithOrders++;
-        }
-        data.push({
-          date: dateKey,
-          orders: orderCount,
-          average: totalOrders / Math.max(daysWithOrders, 1)
-        });
-        currentDate.setDate(currentDate.getDate() + 1);
-      }
-      return { data, average: totalOrders / Math.max(daysWithOrders, 1) };
-    } else if (trendTimeframe === 'weekly') {
-      // Group by week
-      const weeklyData = {};
-      recentOrders.forEach(order => {
-        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        const weekStart = new Date(shippedDate);
-        weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Start of week (Sunday)
-        const weekKey = weekStart.toISOString().split('T')[0];
-        weeklyData[weekKey] = (weeklyData[weekKey] || 0) + 1;
-      });
-
-      // Convert to array and fill in missing weeks
-      const data = [];
-      let currentDate = new Date(thirtyDaysAgo);
-      currentDate.setDate(currentDate.getDate() - currentDate.getDay()); // Start at beginning of week
-      let totalOrders = 0;
-      let weeksWithOrders = 0;
-
-      while (currentDate <= now) {
-        const weekKey = currentDate.toISOString().split('T')[0];
-        const orderCount = weeklyData[weekKey] || 0;
-        if (orderCount > 0) {
-          totalOrders += orderCount;
-          weeksWithOrders++;
-        }
-        data.push({
-          date: `Week of ${new Date(weekKey).toLocaleDateString()}`,
-          orders: orderCount,
-          average: totalOrders / Math.max(weeksWithOrders, 1)
-        });
-        currentDate.setDate(currentDate.getDate() + 7);
-      }
-      return { data, average: totalOrders / Math.max(weeksWithOrders, 1) };
-    } else {
-      // Group by month
-      const monthlyData = {};
-      recentOrders.forEach(order => {
-        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        const monthKey = shippedDate.toISOString().slice(0, 7); // YYYY-MM
-        monthlyData[monthKey] = (monthlyData[monthKey] || 0) + 1;
-      });
-
-      // Convert to array and fill in missing months
-      const data = [];
-      let currentDate = new Date(thirtyDaysAgo);
-      currentDate.setDate(1); // Start at beginning of month
-      let totalOrders = 0;
-      let monthsWithOrders = 0;
-
-      while (currentDate <= now) {
-        const monthKey = currentDate.toISOString().slice(0, 7);
-        const orderCount = monthlyData[monthKey] || 0;
-        if (orderCount > 0) {
-          totalOrders += orderCount;
-          monthsWithOrders++;
-        }
-        data.push({
-          date: new Date(currentDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-          orders: orderCount,
-          average: totalOrders / Math.max(monthsWithOrders, 1)
-        });
-        currentDate.setMonth(currentDate.getMonth() + 1);
-      }
-      return { data, average: totalOrders / Math.max(monthsWithOrders, 1) };
-    }
-  };
+    return { 
+      data, 
+      average: totalOrders / Math.max(Object.keys(grouped).length, 1) 
+    };
+  }, [orders, trendTimeframe]);
 
   return (
     <div className="relative min-h-screen">
@@ -1199,14 +1263,14 @@ function Dashboard() {
               
               // Get orders that need to be shipped today
               const ordersToVerify = orders.filter(order => 
-                needsShippedToday(order.allocated_at) &&
+                needsShippedToday(order) &&
                 !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
                 order.ready_to_ship === true
               );
 
               // Get orders from not_ready_to_ship that need to be rechecked
               const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
-                needsShippedToday(order.allocated_at)
+                needsShippedToday(order)
               );
 
               processOrders(ordersToVerify, notReadyOrdersToVerify);
@@ -1260,13 +1324,7 @@ function Dashboard() {
             <div className="text-9xl font-extrabold text-slate-900 mb-2 text-left">{ordersToShipToday.length}</div>
             <div className="text-5xl text-slate-700 font-medium text-left mb-1">Needs shipped today</div>
             <div className="text-9xl font-extrabold text-slate-800 mb-2 text-left pt-10">
-              {
-                orders.filter(order =>
-                  !needsShippedToday(order.allocated_at) &&
-                  !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
-                  order.ready_to_ship === true
-                ).length
-              }
+              {ordersToShipTomorrow.length}
             </div>
             <div className="text-5xl text-slate-600 font-medium text-left mb-1">Needs shipped tomorrow</div>
             <div className="text-9xl font-extrabold text-slate-700 mb-2 text-left pt-10">{shippedToday.length}</div>
@@ -1371,7 +1429,7 @@ function Dashboard() {
             <div className="w-full h-[400px]">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart
-                  data={getHourlyShippingData()}
+                  data={getHourlyShippingData}
                   margin={{
                     top: 20,
                     right: 30,
@@ -1452,9 +1510,9 @@ function Dashboard() {
           </div>
           <div className="p-3 sm:p-6">
             {(() => {
-              const trends = getShippingTrends();
-              const averageText = trendTimeframe === 'daily' ? 'per day' :
-                                trendTimeframe === 'weekly' ? 'per week' : 'per month';
+              const trends = getShippingTrends;
+                const averageText = trendTimeframe === 'daily' ? 'per day' :
+                                  trendTimeframe === 'weekly' ? 'per week' : 'per month';
               
               return (
                 <>
@@ -1607,6 +1665,7 @@ function Dashboard() {
                   <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Line Items</th>
                   <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocated At</th>
                   <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shipped At</th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -1666,12 +1725,25 @@ function Dashboard() {
                         } 
                       })()}
                     </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <button
+                        onClick={() => handleManualComplete(order.order_number)}
+                        className={`px-2 py-1 text-xs font-medium rounded border transition-colors duration-150 ${
+                          confirmingManual === order.order_number 
+                            ? 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100' 
+                            : 'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100'
+                        }`}
+                        title={confirmingManual === order.order_number ? "Click again to confirm manual completion" : "Mark as manually completed"}
+                      >
+                        {confirmingManual === order.order_number ? 'Confirm?' : 'Mark Done'}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
               <tfoot className="bg-gray-50">
                 <tr>
-                  <td colSpan="6" className="px-6 py-4">
+                  <td colSpan="7" className="px-6 py-4">
                   </td>
                 </tr>
               </tfoot>
@@ -1766,6 +1838,8 @@ function Dashboard() {
                         order.status === 'canceled' ? 'bg-red-100 text-red-800' :
                         order.status === 'allocated' ? 'bg-yellow-100 text-yellow-800' :
                         order.status === 'cleared' ? 'bg-gray-100 text-gray-800' :
+                        order.status === 'wholesale' ? 'bg-purple-100 text-purple-800' :
+                        order.status === 'manual' ? 'bg-orange-100 text-orange-800' :
                         'bg-teal-100 text-teal-800'
                       }`}>
                         {order.status || 'Unknown'}
@@ -1799,9 +1873,9 @@ function Dashboard() {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {(() => { 
                         try { 
-                          const reqDate = getRequiredShipDate(order.allocated_at);
+                          const reqDate = getRequiredShipDate(order);
                           if (!reqDate) return '—';
-                          return new Intl.DateTimeFormat('en-US', {
+                          const dateStr = new Intl.DateTimeFormat('en-US', {
                             timeZone: 'America/New_York',
                             year: 'numeric',
                             month: '2-digit',
@@ -1811,6 +1885,22 @@ function Dashboard() {
                             second: '2-digit',
                             hour12: true
                           }).format(reqDate);
+                          
+                          // Add indicator if using ShipHero override
+                          if (order.required_ship_date_override) {
+                            return (
+                              <div className="flex items-center gap-1">
+                                <span>{dateStr}</span>
+                                <span 
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
+                                  title="Date from ShipHero override"
+                                >
+                                  SH
+                                </span>
+                              </div>
+                            );
+                          }
+                          return dateStr;
                         } catch { 
                           return '—'; 
                         } 
@@ -1839,9 +1929,9 @@ function Dashboard() {
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
                         !order.shippedAt ? 'bg-gray-100 text-gray-600' :
-                        checkSLAMet(order.shippedAt, order.allocated_at) ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                        checkSLAMet(order.shippedAt, order) ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
                       }`}>
-                        {!order.shippedAt ? 'TBD' : checkSLAMet(order.shippedAt, order.allocated_at) ? 'True' : 'False'}
+                        {!order.shippedAt ? 'TBD' : checkSLAMet(order.shippedAt, order) ? 'True' : 'False'}
                       </span>
                     </td>
                   </tr>
