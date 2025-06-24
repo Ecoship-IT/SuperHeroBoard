@@ -272,18 +272,6 @@ VITE_CLIENT_MAPPINGS={"QWNjb3VudDoxMjM0NTY=":"Mega Corp Industries","QWNjb3VudDo
 - **Not Ready to Ship**: Orders removed from shipping queue
 - **Product Sizes**: EFM product configuration
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## 📝 License
-
-This project is private and proprietary.
-
 ## 🆘 Support
 
 For support or questions, please contact the development team. 
