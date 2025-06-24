@@ -4,6 +4,8 @@ import { db } from './firebase';
 import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 import EFMProductSizes from './EFMProductSizes';
+import PasswordGate from './PasswordGate';
+import AppWrapper from './AppWrapper';
 
 const FilterSection = ({ 
   clientValue, 
@@ -159,7 +161,7 @@ const FilterSection = ({
   );
 };
 
-function Dashboard() {
+export function Dashboard({ isAuthenticated, isGuest, onLogout }) {
   const [orders, setOrders] = useState([]);
   const [notReadyToShipOrders, setNotReadyToShipOrders] = useState([]);
   const [showAllClients, setShowAllClients] = useState(false);
@@ -497,14 +499,39 @@ function Dashboard() {
   }, [orders, sortField, sortDirection]);
 
   const exportToCSV = useCallback((data, filename) => {
-    const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Shipped At'];
+    const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Required Ship Date', 'Shipped At', 'SLA Met'];
     const csvData = data.map(order => [
       order.order_number,
       accountMap[order.account_uuid] || order.account_uuid || 'Unknown',
       order.status,
       Array.isArray(order.line_items) ? order.line_items.length : 0,
       order.allocated_at?.toDate?.()?.toLocaleString() || new Date(order.allocated_at).toLocaleString(),
-      order.shippedAt?.toDate?.()?.toLocaleString() || (order.shippedAt ? new Date(order.shippedAt).toLocaleString() : 'Not Shipped')
+      (() => { 
+        try { 
+          const reqDate = getRequiredShipDate(order);
+          if (!reqDate) return '—';
+          const dateStr = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+          }).format(reqDate);
+          
+          // Add indicator if using ShipHero override
+          if (order.required_ship_date_override) {
+            return `${dateStr} (SH Override)`;
+          }
+          return dateStr;
+        } catch { 
+          return '—'; 
+        } 
+      })(),
+      order.shippedAt?.toDate?.()?.toLocaleString() || (order.shippedAt ? new Date(order.shippedAt).toLocaleString() : 'Not Shipped'),
+      !order.shippedAt ? 'TBD' : checkSLAMet(order.shippedAt, order) ? 'True' : 'False'
     ]);
 
     const csvContent = [headers, ...csvData]
@@ -873,7 +900,7 @@ function Dashboard() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer 3cedf16a-9d42-4ed4-9e6c-e8f850f3b2e3'
+          'Authorization': `Bearer ${import.meta.env.VITE_SHIPHERO_API_TOKEN}`
         },
         body: JSON.stringify(queryBody)
       });
@@ -1194,27 +1221,29 @@ function Dashboard() {
                 <span>SuperHero Board</span>
               </div>
             </a>
-            <Link 
-              to="/efm-product-sizes" 
-              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
-            >
-              <div className="flex items-center space-x-2">
-                <svg 
-                  className="w-5 h-5" 
-                  fill="none" 
-                  stroke="currentColor" 
-                  viewBox="0 0 24 24"
-                >
-                  <path 
-                    strokeLinecap="round" 
-                    strokeLinejoin="round" 
-                    strokeWidth={2} 
-                    d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
-                  />
-                </svg>
-                <span>EFM Product Sizes</span>
-              </div>
-            </Link>
+            {isAuthenticated && (
+              <Link 
+                to="/efm-product-sizes" 
+                className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+              >
+                <div className="flex items-center space-x-2">
+                  <svg 
+                    className="w-5 h-5" 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path 
+                      strokeLinecap="round" 
+                      strokeLinejoin="round" 
+                      strokeWidth={2} 
+                      d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"
+                    />
+                  </svg>
+                  <span>EFM Product Sizes</span>
+                </div>
+              </Link>
+            )}
             <a 
               href="#" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
@@ -1237,74 +1266,108 @@ function Dashboard() {
               </div>
             </a>
           </nav>
+          
+          {/* Logout Button at Bottom */}
+          <div className="absolute bottom-0 left-0 right-0 p-4">
+            <button
+              onClick={() => {
+                console.log('Logout clicked, onLogout function:', onLogout);
+                if (onLogout) {
+                  onLogout();
+                } else {
+                  console.error('onLogout function is not defined');
+                }
+              }}
+              className="block w-full px-6 py-3 text-red-700 hover:bg-red-50 rounded-lg transition-all duration-200 text-lg font-semibold border border-red-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-red-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
+                  />
+                </svg>
+                <span>{isGuest ? 'Exit Guest Mode' : 'Logout'}</span>
+              </div>
+            </button>
+          </div>
         </div>
       </div>
 
       <div className="w-full md:w-[90%] lg:w-[85%] mx-auto px-4 font-sans">
         <div className="relative pt-10">
           <div className="text-center">
-            <h1 className="text-6xl font-extrabold tracking-tight text-slate-800 mb-2">SuperHero Board</h1>
+            <h1 className="text-6xl font-extrabold tracking-tight text-slate-800 mb-2">⚡ SuperHero Board ⚡</h1>
             <p className="text-slate-500 text-lg font-medium mb-8 pt-2">
               Real-time order overview for when <i>ship</i> gets real
             </p>
           </div>
-          <button
-            onClick={() => {
-              if (isRefreshing) return;
-              
-              if (!isRefreshConfirming) {
-                setIsRefreshConfirming(true);
-                setRefreshLog([]); // Clear previous logs
-                const timer = setTimeout(() => {
-                  setIsRefreshConfirming(false);
-                }, 5000);
-                return () => clearTimeout(timer);
-              }
-              
-              // Get orders that need to be shipped today
-              const ordersToVerify = orders.filter(order => 
-                needsShippedToday(order) &&
-                !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
-                order.ready_to_ship === true
-              );
-
-              // Get orders from not_ready_to_ship that need to be rechecked
-              const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
-                needsShippedToday(order)
-              );
-
-              processOrders(ordersToVerify, notReadyOrdersToVerify);
-            }}
-            disabled={isRefreshing}
-            className={`absolute top-10 right-0 px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
-              isRefreshing ? 'bg-blue-600 opacity-75 cursor-not-allowed' :
-              isRefreshConfirming ? 'bg-red-600 hover:bg-red-700 text-white' : 
-              'bg-slate-700 hover:bg-slate-800 text-white'
-            }`}
-          >
-            <svg 
-              className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} 
-              fill="none" 
-              stroke="currentColor" 
-              viewBox="0 0 24 24"
-            >
-              <path 
-                strokeLinecap="round" 
-                strokeLinejoin="round" 
-                strokeWidth={2} 
-                d={isRefreshing ? 
-                  "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" :
-                  isRefreshConfirming ?
-                  "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" :
-                  "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+          {isAuthenticated && (
+            <button
+              onClick={() => {
+                if (isRefreshing) return;
+                
+                if (!isRefreshConfirming) {
+                  setIsRefreshConfirming(true);
+                  setRefreshLog([]); // Clear previous logs
+                  const timer = setTimeout(() => {
+                    setIsRefreshConfirming(false);
+                  }, 5000);
+                  return () => clearTimeout(timer);
                 }
-              />
-            </svg>
-            {isRefreshing ? 
-              `Refreshing (${refreshProgress.current}/${refreshProgress.total})` : 
-              isRefreshConfirming ? 'Are you sure?' : 
-              'Refresh Orders'}
-          </button>
+                
+                // Get orders that need to be shipped today
+                const ordersToVerify = orders.filter(order => 
+                  needsShippedToday(order) &&
+                  !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
+                  order.ready_to_ship === true
+                );
+
+                // Get orders from not_ready_to_ship that need to be rechecked
+                const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
+                  needsShippedToday(order)
+                );
+
+                processOrders(ordersToVerify, notReadyOrdersToVerify);
+              }}
+              disabled={isRefreshing}
+              className={`absolute top-10 right-0 px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
+                isRefreshing ? 'bg-blue-600 opacity-75 cursor-not-allowed' :
+                isRefreshConfirming ? 'bg-red-600 hover:bg-red-700 text-white' : 
+                'bg-slate-700 hover:bg-slate-800 text-white'
+              }`}
+            >
+              <svg 
+                className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d={isRefreshing ? 
+                    "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" :
+                    isRefreshConfirming ?
+                    "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" :
+                    "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  }
+                />
+              </svg>
+              {isRefreshing ? 
+                `Refreshing (${refreshProgress.current}/${refreshProgress.total})` : 
+                isRefreshConfirming ? 'Are you sure?' : 
+                'Refresh Orders'}
+            </button>
+          )}
           {isRefreshing && refreshLog.length > 0 && (
             <div className="fixed bottom-4 right-4 w-96 max-h-96 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
               <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-3">
@@ -1322,19 +1385,19 @@ function Dashboard() {
         <div className="flex flex-col md:flex-row items-start gap-12 mt-10 pt-5">
           <div className="flex flex-col justify-start pt-2 flex-[1.6]">
             <div className="text-9xl font-extrabold text-slate-900 mb-2 text-left">{ordersToShipToday.length}</div>
-            <div className="text-5xl text-slate-700 font-medium text-left mb-1">Needs shipped today</div>
+            <div className="text-4xl text-slate-700 font-medium text-left mb-1">🚚 Needs shipped today</div>
             <div className="text-9xl font-extrabold text-slate-800 mb-2 text-left pt-10">
-              {ordersToShipTomorrow.length}
+              {shippedToday.length}
             </div>
-            <div className="text-5xl text-slate-600 font-medium text-left mb-1">Needs shipped tomorrow</div>
-            <div className="text-9xl font-extrabold text-slate-700 mb-2 text-left pt-10">{shippedToday.length}</div>
-            <div className="text-5xl text-slate-500 font-medium text-left mb-1">Shipped today</div>
+            <div className="text-4xl text-slate-600 font-medium text-left mb-1">🎉 Shipped today</div>
+            <div className="text-9xl font-extrabold text-slate-700 mb-2 text-left pt-10">{ordersToShipTomorrow.length}</div>
+            <div className="text-4xl text-slate-500 font-medium text-left mb-1">📅 Needs shipped tomorrow</div>
           </div>
 
           <div className="flex-[1.4] w-full h-full">
             <div className="h-full">
               <div>
-                <h2 className="text-2xl font-bold text-slate-800 mb-3">Top Clients by Open Orders</h2>
+                <h2 className="text-2xl font-bold text-slate-800 mb-3">🏆 Top Clients by Open Orders 🏆</h2>
                 <div className="overflow-y-auto max-h-[300px]">
                   <ul className="divide-y divide-slate-200">
                     {visibleClients.slice(0, showAllClients ? undefined : 6).map(([client, count], idx) => (
@@ -2059,10 +2122,9 @@ function Dashboard() {
 
 function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Dashboard />} />
-      <Route path="/efm-product-sizes" element={<EFMProductSizes />} />
-    </Routes>
+    <PasswordGate>
+      <AppWrapper />
+    </PasswordGate>
   );
 }
 
