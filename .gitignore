@@ -62,12 +62,18 @@ node_modules/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
+# dotenv environment variables file - ALL VARIATIONS
 .env
+.env.*
 .env.local
+.env.development
 .env.development.local
-.env.test.local
+.env.test
+.env.test.local  
+.env.production
 .env.production.local
+dashboard/.env
+dashboard/.env.*
 
 # Client configuration files (keep examples)
 client-mappings.json
