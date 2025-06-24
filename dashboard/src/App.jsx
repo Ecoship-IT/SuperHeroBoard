@@ -161,7 +161,7 @@ const FilterSection = ({
   );
 };
 
-export function Dashboard({ isAuthenticated, isGuest, onLogout }) {
+export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [orders, setOrders] = useState([]);
   const [notReadyToShipOrders, setNotReadyToShipOrders] = useState([]);
   const [showAllClients, setShowAllClients] = useState(false);
@@ -229,51 +229,21 @@ export function Dashboard({ isAuthenticated, isGuest, onLogout }) {
     { value: 'tbd', label: 'TBD' }
   ];
 
-  const accountMap = {
-    "QWNjb3VudDo4MzMyNw==": "Polymer Clay Superstore",
-    "QWNjb3VudDo4Mzc4Mw==": "Waverles Shipping",
-    "QWNjb3VudDo4Mzk3MQ==": "Friendly Robot",
-    "QWNjb3VudDo4Mzk4Mw==": "Quilling Shipping",
-    "QWNjb3VudDo4NDQxMw==": "Waterlust Shipping",
-    "QWNjb3VudDo4NDQxNg==": "Omez Beauty",
-    "QWNjb3VudDo4NDQxOQ==": "Gist Yarn",
-    "QWNjb3VudDo4NDQzMQ==": "Bonne et Filou",
-    "QWNjb3VudDo4NDQ0NA==": "Chiropractic Outside The Box",
-    "QWNjb3VudDo4NDQ0NQ==": "Tracy Higley",
-    "QWNjb3VudDo4NDQ1OA==": "Mary DeMuth Art",
-    "QWNjb3VudDo4NDQ2Nw==": "Birmingham Pens",
-    "QWNjb3VudDo4NDQ5Ng==": "Iron Snail",
-    "QWNjb3VudDo4NDU1NA==": "Stephanie Whittier Wellness / T Spheres Brand",
-    "QWNjb3VudDo4NDU3OQ==": "I Have ADHD",
-    "QWNjb3VudDo4NDU4Mw==": "Visible Health",
-    "QWNjb3VudDo4NDYwNw==": "Lisa T. Bergren",
-    "QWNjb3VudDo4NDYwOA==": "Maker Milk",
-    "QWNjb3VudDo4NDYzNw==": "Pit Command",
-    "QWNjb3VudDo4NDcwMA==": "Radical Tea towel",
-    "QWNjb3VudDo4NDcwMQ==": "Pack for Camp",
-    "QWNjb3VudDo4NDcwMw==": "Venture Healthcare LTD",
-    "QWNjb3VudDo4NDczOA==": "Forth, LLC",
-    "QWNjb3VudDo4NDgwMA==": "Water eStore",
-    "QWNjb3VudDo4NDg0MA==": "Monochrome Books Inc",
-    "QWNjb3VudDo4NDg1MQ==": "Cottonique Shipping",
-    "QWNjb3VudDo4NDg3Mg==": "Earth Fed Muscle",
-    "QWNjb3VudDo4NDg5Mw==": "Rongrong Shipping",
-    "QWNjb3VudDo4NDg5Ng==": "Forge and Foster",
-    "QWNjb3VudDo4NDkxMw==": "Carmen Electra - Mawer Capital",
-    "QWNjb3VudDo4NDkyMQ==": "TheTickSuit Shipping",
-    "QWNjb3VudDo4NDkzOQ==": "Oh Flora Store",
-    "QWNjb3VudDo4NTA0MQ==": "Blu & Green",
-    "QWNjb3VudDo4NTA1MA==": "Northshea Shipping",
-    "QWNjb3VudDo4NTEwNg==": "Rizo Radiance",
-    "QWNjb3VudDo4NTIxNQ==": "Eco Ship",
-    "QWNjb3VudDo4NTIxNw==": "Roccoco Botanicals",
-    "QWNjb3VudDo4NTI2MA==": "Nano-B",
-    "QWNjb3VudDo4NTQ0OA==": "Liv Holistic",
-    "QWNjb3VudDo4NTQ1MA==": "Sustainable Threads",
-    "QWNjb3VudDo4NTQ1OA==": "Just Tall Ltd",
-    "QWNjb3VudDo4NTQ3MQ==": "Dancing Moon Coffee Co.",
-    "QWNjb3VudDo4NTc4Nw==": "Oley Valley Health"
-  };
+  // Parse client mappings from environment variable
+  const accountMap = useMemo(() => {
+    const clientMappings = import.meta.env.VITE_CLIENT_MAPPINGS;
+    if (!clientMappings) {
+      console.warn('VITE_CLIENT_MAPPINGS not configured. Client names will show as UUIDs.');
+      return {};
+    }
+    
+    try {
+      return JSON.parse(clientMappings);
+    } catch (error) {
+      console.error('Error parsing VITE_CLIENT_MAPPINGS:', error);
+      return {};
+    }
+  }, []);
 
   // Add window width state
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
@@ -1221,7 +1191,7 @@ export function Dashboard({ isAuthenticated, isGuest, onLogout }) {
                 <span>SuperHero Board</span>
               </div>
             </a>
-            {isAuthenticated && (
+            {isAuthenticated && userRole === 'admin' && (
               <Link 
                 to="/efm-product-sizes" 
                 className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
@@ -1309,7 +1279,7 @@ export function Dashboard({ isAuthenticated, isGuest, onLogout }) {
               Real-time order overview for when <i>ship</i> gets real
             </p>
           </div>
-          {isAuthenticated && (
+          {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
             <button
               onClick={() => {
                 if (isRefreshing) return;

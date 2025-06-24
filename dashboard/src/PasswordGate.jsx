@@ -5,32 +5,48 @@ const PasswordGate = ({ children }) => {
   const [password, setPassword] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isGuest, setIsGuest] = useState(false);
+  const [userRole, setUserRole] = useState(null); // 'admin', 'limited', 'guest'
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  // Your dashboard password - change this to whatever you want
-  const DASHBOARD_PASSWORD = 'teamlead';
+  // Load passwords from environment variables
+  const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'teamlead';
+  const LIMITED_PASSWORD = import.meta.env.VITE_LIMITED_PASSWORD || 'testaccount';
 
   useEffect(() => {
     // Check if already authenticated (stored in localStorage)
     const isAuth = localStorage.getItem('dashboard-authenticated') === 'true';
     const isGuestMode = localStorage.getItem('dashboard-guest') === 'true';
-    if (isAuth) {
+    const storedRole = localStorage.getItem('user-role');
+    
+    if (isAuth && storedRole) {
       setIsAuthenticated(true);
+      setUserRole(storedRole);
     } else if (isGuestMode) {
       setIsGuest(true);
+      setUserRole('guest');
     }
   }, []);
 
   const handleSubmit = (e) => {
     e.preventDefault();
     
-    if (password === DASHBOARD_PASSWORD) {
+    if (password === ADMIN_PASSWORD) {
       setIsAuthenticated(true);
+      setUserRole('admin');
       localStorage.setItem('dashboard-authenticated', 'true');
+      localStorage.setItem('user-role', 'admin');
       localStorage.removeItem('dashboard-guest');
       setError('');
-      navigate('/'); // Always go to main page
+      navigate('/');
+    } else if (password === LIMITED_PASSWORD) {
+      setIsAuthenticated(true);
+      setUserRole('limited');
+      localStorage.setItem('dashboard-authenticated', 'true');
+      localStorage.setItem('user-role', 'limited');
+      localStorage.removeItem('dashboard-guest');
+      setError('');
+      navigate('/');
     } else {
       setError('Incorrect password');
       setPassword('');
@@ -39,18 +55,22 @@ const PasswordGate = ({ children }) => {
 
   const handleGuestAccess = () => {
     setIsGuest(true);
+    setUserRole('guest');
     localStorage.setItem('dashboard-guest', 'true');
+    localStorage.setItem('user-role', 'guest');
     localStorage.removeItem('dashboard-authenticated');
-    navigate('/'); // Always go to main page
+    navigate('/');
   };
 
   const handleLogout = () => {
     setIsAuthenticated(false);
     setIsGuest(false);
-    setPassword(''); // Clear the password field
-    setError(''); // Clear any error messages
+    setUserRole(null);
+    setPassword('');
+    setError('');
     localStorage.removeItem('dashboard-authenticated');
     localStorage.removeItem('dashboard-guest');
+    localStorage.removeItem('user-role');
   };
 
   if (isAuthenticated || isGuest) {
@@ -59,6 +79,7 @@ const PasswordGate = ({ children }) => {
         {React.cloneElement(children, { 
           isAuthenticated,
           isGuest,
+          userRole,
           onLogout: handleLogout 
         })}
       </div>

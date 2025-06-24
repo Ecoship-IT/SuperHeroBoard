@@ -1,0 +1,16 @@
+{
+  "_comment": "Example client account mappings for SuperHero Board",
+  "_description": "Map your ShipHero account UUIDs to friendly display names",
+  "_instructions": [
+    "1. Copy this content and modify with your actual account UUIDs and names",
+    "2. Remove the comment fields (starting with _) when copying to your .env file",
+    "3. Format as a single line in your .env file as: VITE_CLIENT_MAPPINGS={...}",
+    "4. Escape any quotes inside client names with backslashes"
+  ],
+  
+  "QWNjb3VudDoxMjM0NTY=": "Example Client 1",
+  "QWNjb3VudDo3ODkwMTI=": "Example Client 2", 
+  "QWNjb3VudDo0NTY3ODk=": "Example Client 3",
+  "QWNjb3VudDo5ODc2NTQ=": "Example Client 4",
+  "QWNjb3VudDoxMTIyMzM=": "Example Client 5"
+} 
