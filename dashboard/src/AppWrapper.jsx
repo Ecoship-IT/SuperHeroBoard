@@ -325,8 +325,8 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
             <Routes>
         <Route path="/" element={<Dashboard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/superhero-alt" element={<SuperheroAlt isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
-        {/* Temporarily hidden Level Up Log */}
-        {/* <Route path="/level-up-log" element={<LevelUpLog isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} /> */}
+        {/* Hidden Level Up Log - accessible via direct URL only */}
+        <Route path="/level-up-log" element={<LevelUpLog isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/location-builder" element={<LocationBuilder isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/compliance-board" element={<ComplianceBoard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         {/* Only show EFM Product Sizes to admin users */}

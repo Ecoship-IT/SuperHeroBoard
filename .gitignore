@@ -107,3 +107,12 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Google Service Account Keys
+*service-account*.json
+*serviceAccount*.json
+*firebase-adminsdk*.json
+service-account-key.json
+google-credentials.json
+firebase-key.json
+superheroboardv2-84db896e1c9c.json

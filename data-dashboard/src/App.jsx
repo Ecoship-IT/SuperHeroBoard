@@ -372,7 +372,7 @@ function App() {
       // Calculate fill rate: (total - problem) / total × 100
       const fillRate = totalUnshippedOrders > 0 
         ? Math.round(((totalUnshippedOrders - problemOrdersCount) / totalUnshippedOrders) * 100 * 10) / 10
-        : 0;
+        : 100; // Default to 100% if no orders (no problems possible)
 
       const fillRateData = {
         fillRate,
@@ -610,7 +610,7 @@ function App() {
       
       // Trigger UI re-render now that pack calculations are complete
       setPackCalculationsComplete(prev => prev + 1);
-      console.log('🔄 Triggering UI re-render with updated pack success rates');
+      console.log('🔄 Triggering UI re-render with updated accurate shipments rates');
     } catch (error) {
       console.error('❌ Error calculating pack success rates:', error);
     } finally {
@@ -645,12 +645,12 @@ function App() {
   useEffect(() => {
     if (orders.length > 0 && !isCalculatingPackSuccessRates.current && !hasCalculatedPackRatesThisSession.current) {
       hasCalculatedPackRatesThisSession.current = true; // Mark as done for this session
-      console.log('🔄 Starting background pack success rate calculation...');
+      console.log('🔄 Starting background accurate shipments calculation...');
       setTimeout(() => {
         calculateHistoricalPackSuccessRates(orders).then(() => {
-          console.log('✅ Background pack success rates calculation completed');
+          console.log('✅ Background accurate shipments calculation completed');
         }).catch(error => {
-          console.error('❌ Background pack success rates calculation failed:', error);
+          console.error('❌ Background accurate shipments calculation failed:', error);
         });
       }, 3000); // 3 second delay to ensure everything else is loaded
     }
@@ -872,9 +872,9 @@ function App() {
         const dateKey = easternDate.toLocaleDateString('en-CA');
         const packSuccessRate = getStoredPackSuccessRate(dateKey) || 100;
         
-        // Debug pack success rate loading
+        // Debug accurate shipments rate loading
         if (businessDaysAdded < 3) {
-          console.log(`📊 Pack success rate for ${dateKey}: ${packSuccessRate}% (stored: ${getStoredPackSuccessRate(dateKey) ? 'YES' : 'NO, using default 100%'})`);
+          console.log(`📊 Accurate shipments rate for ${dateKey}: ${packSuccessRate}% (stored: ${getStoredPackSuccessRate(dateKey) ? 'YES' : 'NO, using default 100%'})`);
         }
         
         businessDays.unshift({
@@ -885,7 +885,7 @@ function App() {
           sla: slaPercentage,
           orderCount: ordersRequiredThisDay,
           slaMetCount: ordersMetSLA,
-          fillRate: getStoredFillRate(dateKey) || 0, // Use stored fill rate or 0%
+          fillRate: getStoredFillRate(dateKey) || 100, // Use stored fill rate or 100% (assume no problems for historical data)
           replyTime: Math.round((2 + Math.random() * 3) * 10) / 10,
           packErrors: packSuccessRate // Use stored pack success rate or 100% (no errors)
         });
@@ -1196,7 +1196,7 @@ function App() {
                 </div>
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Pack Success Rate</p>
+                <p className="text-sm font-medium text-gray-500">Accurate Shipments</p>
                 <p className="text-2xl font-semibold text-gray-900">{metricsData.length > 0 ? metricsData[metricsData.length - 1].packErrors : 0}%</p>
               </div>
             </div>
@@ -1213,10 +1213,10 @@ function App() {
                 <LineChart data={metricsData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
                   <XAxis dataKey="dateFormatted" stroke="#6B7280" tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={['dataMin - 5', 'dataMax + 5']} />
+                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={[0, 110]} tickFormatter={(value) => value <= 100 ? `${value}%` : ''} ticks={[0, 20, 40, 60, 80, 100]} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />
-                  <Line type="monotone" dataKey="sla" stroke="#10B981" strokeWidth={2} dot={{ r: 3 }} name="SLA %" />
+                  <Line type="monotone" dataKey="sla" stroke="#10B981" strokeWidth={2} dot={false} name="SLA %" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -1230,10 +1230,10 @@ function App() {
                 <LineChart data={metricsData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
                   <XAxis dataKey="dateFormatted" stroke="#6B7280" tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={['dataMin - 5', 'dataMax + 5']} />
+                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={[0, 110]} tickFormatter={(value) => value <= 100 ? `${value}%` : ''} ticks={[0, 20, 40, 60, 80, 100]} />
                   <Tooltip content={<CustomFillRateTooltip />} />
                   <Legend />
-                  <Line type="monotone" dataKey="fillRate" stroke="#3B82F6" strokeWidth={2} dot={{ r: 3 }} name="Fill Rate %" />
+                  <Line type="monotone" dataKey="fillRate" stroke="#3B82F6" strokeWidth={2} dot={false} name="Fill Rate %" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -1247,27 +1247,27 @@ function App() {
                 <LineChart data={metricsData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
                   <XAxis dataKey="dateFormatted" stroke="#6B7280" tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={['dataMin - 1', 'dataMax + 1']} />
+                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={[0, 8]} tickFormatter={(value) => `${value}h`} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />
-                  <Line type="monotone" dataKey="replyTime" stroke="#F59E0B" strokeWidth={2} dot={{ r: 3 }} name="Reply Time (hours)" />
+                  <Line type="monotone" dataKey="replyTime" stroke="#F59E0B" strokeWidth={2} dot={false} name="Reply Time (hours)" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </div>
 
-          {/* Pack Success Rate Chart */}
+          {/* Accurate Shipments Chart */}
           <div className="bg-white rounded-lg shadow p-6">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">Pack Success Rate</h3>
+            <h3 className="text-lg font-medium text-gray-900 mb-4">Accurate Shipments</h3>
             <div className="h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={metricsData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
                   <XAxis dataKey="dateFormatted" stroke="#6B7280" tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={[0, 'dataMax + 1']} />
+                  <YAxis stroke="#6B7280" tick={{ fontSize: 12 }} domain={[0, 110]} tickFormatter={(value) => value <= 100 ? `${value}%` : ''} ticks={[0, 20, 40, 60, 80, 100]} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend />
-                  <Line type="monotone" dataKey="packErrors" stroke="#10B981" strokeWidth={2} dot={{ r: 3 }} name="Pack Success Rate %" />
+                  <Line type="monotone" dataKey="packErrors" stroke="#10B981" strokeWidth={2} dot={false} name="Accurate Shipments %" />
                 </LineChart>
               </ResponsiveContainer>
             </div>

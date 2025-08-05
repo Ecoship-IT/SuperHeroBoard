@@ -6,6 +6,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitMessage, setSubmitMessage] = useState('');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [showShippingTips, setShowShippingTips] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -475,6 +476,76 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
         </div>
         </div>
       </div>
+
+      {/* Shipping Tips Button - Fixed position for mobile visibility */}
+      <button
+        onClick={() => setShowShippingTips(true)}
+        className="fixed bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg shadow-lg transition-all duration-200 z-40 text-sm"
+      >
+        💡 Get Tips for Shipping
+      </button>
+
+      {/* Shipping Tips Modal */}
+      {showShippingTips && (
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+          onClick={() => setShowShippingTips(false)}
+        >
+          <div 
+            className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-blue-600 text-white px-6 py-4 rounded-t-lg text-center">
+              <h2 className="text-xl font-bold">Shipping Tips</h2>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 space-y-4">
+              <div>
+                <h4 className="font-semibold text-gray-800 mb-2">Ship by store/order type:</h4>
+                <ul className="space-y-1 text-gray-700 ml-4">
+                  <li>• For example, start with all peanut orders</li>
+                  <li>• Then all envelope orders</li>
+                </ul>
+              </div>
+
+              <div>
+                <h4 className="font-semibold text-gray-800 mb-2">Scanner use:</h4>
+                <ul className="space-y-1 text-gray-700 ml-4">
+                  <li>• Only pick it up once per order</li>
+                  <li>• Don't scan "complete" until the order is fully packed and on the belt</li>
+                </ul>
+              </div>
+
+              <div>
+                <h4 className="font-semibold text-gray-800 mb-2">Before leaving your station:</h4>
+                <ul className="space-y-1 text-gray-700 ml-4">
+                  <li>• Check if you need anything else (tape, boxes, labels) to avoid extra trips</li>
+                </ul>
+              </div>
+
+              <div>
+                <h4 className="font-semibold text-gray-800 mb-2">Race the label:</h4>
+                <ul className="space-y-1 text-gray-700 ml-4">
+                  <li>• Put everything (box on top too) on the scale before building</li>
+                  <li>• Add extras like the Rongrong sticker early</li>
+                </ul>
+              </div>
+
+            {/* Modal Footer */}
+            <div className="bg-gray-50 px-6 py-4 rounded-b-lg">
+              <button
+                onClick={() => setShowShippingTips(false)}
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded transition-colors"
+              >
+                Got it!
+              </button>
+            </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

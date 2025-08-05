@@ -181,6 +181,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
   const [refreshLog, setRefreshLog] = useState([]);
 
+
   // Filter states
   const [selectedClient, setSelectedClient] = useState('all');
   const [selectedStatus, setSelectedStatus] = useState('all');
@@ -2711,6 +2712,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
           </div>
         )}
       </div>
+
     </div>
   );
 }
