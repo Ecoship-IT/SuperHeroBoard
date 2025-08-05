@@ -184,6 +184,56 @@ exports.shipHeroWebhook = functions.https.onRequest((req, res) => {
         return;
       }
 
+      if (data.webhook_type === 'Tote Complete') {
+        console.log('📦 Processing Tote Complete webhook:', {
+          batchId: data.batch_id,
+          totesCount: data.totes?.length || 0,
+          timestamp: new Date().toISOString()
+        });
+
+        if (!data.totes || !Array.isArray(data.totes)) {
+          console.warn('⚠️ Tote Complete webhook missing totes array');
+          res.status(400).send('Missing totes data');
+          return;
+        }
+
+        const batch = db.batch();
+        const processedOrders = [];
+
+        // Extract all orders from all totes
+        data.totes.forEach(tote => {
+          if (tote.orders && Array.isArray(tote.orders)) {
+            tote.orders.forEach(order => {
+              if (order.order_number) {
+                const docRef = db.collection('orders').doc(order.order_number);
+                batch.set(docRef, {
+                  tote_completed: true,
+                  tote_completed_at: admin.firestore.FieldValue.serverTimestamp(),
+                  tote_name: tote.tote_name || null,
+                  tote_uuid: tote.tote_uuid || null,
+                  tote_barcode: tote.tote_barcode || null,
+                  batch_id: data.batch_id || null,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+                
+                processedOrders.push(order.order_number);
+              }
+            });
+          }
+        });
+
+        if (processedOrders.length === 0) {
+          console.warn('⚠️ No orders found in Tote Complete webhook');
+          res.status(400).send('No orders found in totes');
+          return;
+        }
+
+        await batch.commit();
+        console.log(`✅ Marked ${processedOrders.length} orders as tote complete:`, processedOrders);
+        res.status(200).send(`Processed ${processedOrders.length} tote completed orders`);
+        return;
+      }
+
       if (data.items && Array.isArray(data.items)) {
         const clearedOrderIds = [...new Set(data.items.map(item => item.order_id))]; // Unique order IDs
 
@@ -221,6 +271,63 @@ exports.shipHeroWebhook = functions.https.onRequest((req, res) => {
         return;
       }
 
+      if (data.webhook_type === 'Tote Complete') {
+        console.log('📋 Processing Tote Complete webhook:', {
+          timestamp: new Date().toISOString(),
+          batchId: data.batch_id,
+          toteCount: data.totes?.length || 0,
+          fullPayload: data
+        });
+
+        if (!data.totes || !Array.isArray(data.totes)) {
+          console.warn('⚠️ Tote Complete webhook missing totes array');
+          res.status(400).send('Invalid tote complete payload - missing totes');
+          return;
+        }
+
+        const batch = db.batch();
+        let totalOrdersProcessed = 0;
+
+        // Process each tote
+        for (const tote of data.totes) {
+          console.log(`📦 Processing tote: ${tote.tote_name} (${tote.tote_barcode})`);
+
+          if (!tote.orders || !Array.isArray(tote.orders)) {
+            console.warn(`⚠️ Tote ${tote.tote_name} has no orders array`);
+            continue;
+          }
+
+          // Process each order in the tote
+          for (const order of tote.orders) {
+            if (!order.order_number) {
+              console.warn(`⚠️ Order in tote ${tote.tote_name} missing order_number`);
+              continue;
+            }
+
+            const docRef = db.collection('orders').doc(order.order_number);
+            batch.set(docRef, {
+              tote_completed: true,
+              tote_completed_at: admin.firestore.FieldValue.serverTimestamp(),
+              tote_name: tote.tote_name,
+              tote_uuid: tote.tote_uuid,
+              tote_barcode: tote.tote_barcode,
+              batch_id: data.batch_id,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+
+            totalOrdersProcessed++;
+            console.log(`✅ Queued order ${order.order_number} for tote completion (Tote: ${tote.tote_name})`);
+          }
+        }
+
+        // Commit all updates
+        await batch.commit();
+        
+        console.log(`🎉 Successfully processed ${totalOrdersProcessed} orders across ${data.totes.length} totes (Batch: ${data.batch_id})`);
+        res.status(200).send(`Tote Complete processed: ${totalOrdersProcessed} orders`);
+        return;
+      }
+
       // Unrecognized webhook
       console.log('⚪️ Ignored webhook:', data.webhook_type);
       res.status(200).send('Ignored');
@@ -234,8 +341,20 @@ exports.shipHeroWebhook = functions.https.onRequest((req, res) => {
 const calculateRequiredShipDate = (allocatedAt) => {
   if (!allocatedAt) return null;
   
-  // Parse the allocated date
-  const alloc = new Date(allocatedAt);
+  // Parse the allocated date - ShipHero sends UTC timestamps
+  let alloc;
+  if (typeof allocatedAt === 'string') {
+    // Handle both formats: "2024-01-15 10:30:00" and "2024-01-15T10:30:00"
+    let timeStr = allocatedAt;
+    if (allocatedAt.includes('T')) {
+      timeStr = allocatedAt.replace('T', ' ');
+    }
+    // Parse as UTC since ShipHero sends UTC timestamps
+    // Fixed: Use 'Z' suffix for proper UTC parsing instead of ' UTC'
+    alloc = new Date(timeStr.replace(' ', 'T') + 'Z');
+  } else {
+    alloc = new Date(allocatedAt);
+  }
   
   // Work entirely in UTC to avoid timezone conversion issues
   const allocUTC = new Date(alloc);
@@ -263,6 +382,10 @@ const calculateRequiredShipDate = (allocatedAt) => {
   while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
     shipDate.setUTCDate(shipDate.getUTCDate() + 1);
   }
+  
+  // Set time to 4 PM Eastern (20:00 UTC during DST, 21:00 UTC during EST)
+  const shipDeadlineHourUTC = isDST(new Date()) ? 20 : 21; // 4 PM Eastern
+  shipDate.setUTCHours(shipDeadlineHourUTC, 0, 0, 0);
   
   return shipDate;
 };
@@ -1016,4 +1139,316 @@ exports.fixOrder = functions.https.onRequest(async (req, res) => {
       error: error.message
     });
   }
+});
+
+exports.createLocation = functions.https.onRequest(async (req, res) => {
+  // Set CORS headers
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).send('Method Not Allowed');
+    return;
+  }
+
+  const { name, pickable, sellable, location_type_id, zone, warehouse_id } = req.body;
+
+  // Validate required fields
+  if (!name || !location_type_id || !warehouse_id) {
+    res.status(400).json({
+      success: false,
+      error: 'Missing required fields: name, location_type_id, and warehouse_id are required'
+    });
+    return;
+  }
+
+  // Build the GraphQL mutation
+  const mutation = `
+    mutation {
+      location_create (data: {
+        name: "${name}"
+        pickable: ${pickable !== false}
+        sellable: ${sellable !== false}
+        location_type_id: "${location_type_id}"
+        zone: "${zone || 'A'}"
+        warehouse_id: "${warehouse_id}"
+      }){
+        request_id
+      }
+    }
+  `;
+
+  try {
+    console.log(`🏗️ Creating location: ${name} (type: ${location_type_id})`);
+    
+    const response = await fetch('https://public-api.shiphero.com/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+      },
+      body: JSON.stringify({ query: mutation })
+    });
+
+    const data = await response.json();
+    console.log(`📥 Full ShipHero response for ${name}:`, JSON.stringify(data, null, 2));
+
+    // Check for GraphQL errors first
+    if (data.errors && data.errors.length > 0) {
+      console.error(`❌ GraphQL error for location ${name}:`, data.errors[0]);
+      res.status(400).json({
+        success: false,
+        error: data.errors[0].message,
+        fullError: data.errors[0]
+      });
+      return;
+    }
+
+    // Check if we have the expected data structure
+    if (!data.data) {
+      console.error(`❌ No data field in response for location ${name}:`, data);
+      res.status(500).json({
+        success: false,
+        error: 'Invalid response structure from ShipHero - no data field'
+      });
+      return;
+    }
+
+    if (!data.data.location_create) {
+      console.error(`❌ No location_create field in response for location ${name}:`, data.data);
+      res.status(500).json({
+        success: false,
+        error: 'Invalid response structure from ShipHero - no location_create field'
+      });
+      return;
+    }
+
+    // Log the actual location_create response
+    console.log(`📋 location_create response:`, data.data.location_create);
+
+    // Handle different possible response structures
+    const locationCreateResponse = data.data.location_create;
+    let requestId = null;
+
+    if (locationCreateResponse.request_id) {
+      requestId = locationCreateResponse.request_id;
+    } else if (locationCreateResponse.id) {
+      requestId = locationCreateResponse.id;
+    } else if (typeof locationCreateResponse === 'string') {
+      requestId = locationCreateResponse;
+    }
+
+    if (!requestId) {
+      console.error(`❌ No identifiable request_id/id in location_create response for ${name}:`, locationCreateResponse);
+      res.status(500).json({
+        success: false,
+        error: 'No request_id or id returned from ShipHero',
+        responseData: locationCreateResponse
+      });
+      return;
+    }
+
+    console.log(`✅ Successfully created location ${name} with identifier: ${requestId}`);
+
+    res.status(200).json({
+      success: true,
+      location_name: name,
+      request_id: requestId
+    });
+
+  } catch (error) {
+    console.error(`❌ Error creating location ${name}:`, error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+exports.getFillRate = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+
+    try {
+    console.log('📦 getFillRate function started - calling ShipHero with timeout...');
+    
+    // Query for problem orders using "problem" tag
+    const queryBody = {
+      query: `
+        query {
+          orders (tag:"problem"){
+            data (first: 10){
+              pageInfo{
+                hasNextPage
+              }
+              edges {
+                cursor
+                node {
+                  order_number
+                  required_ship_date
+                }
+              }
+            }
+          }
+        }
+      `
+    };
+
+    console.log('📡 Making ShipHero API call...');
+    
+    // Add timeout to ShipHero API call
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.log('⏰ ShipHero API call timed out after 8 seconds');
+      controller.abort();
+    }, 8000); // 8 second timeout
+    
+    const response = await fetch('https://public-api.shiphero.com/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+      },
+      body: JSON.stringify(queryBody),
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    console.log('📥 ShipHero API responded with status:', response.status);
+
+    if (!response.ok) {
+      console.error('❌ ShipHero API Error:', response.status, response.statusText);
+      res.status(500).json({
+        success: false,
+        error: `ShipHero API error: ${response.status}`
+      });
+      return;
+    }
+
+    const data = await response.json();
+    console.log('📥 ShipHero fill rate response received');
+
+    if (data.errors) {
+      console.error('❌ GraphQL Errors:', data.errors);
+      res.status(500).json({
+        success: false,
+        error: 'GraphQL errors',
+        details: data.errors
+      });
+      return;
+    }
+
+    // Filter problem orders to only include today or overdue (ignore future dates)
+    const todayEastern = new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+    const todayDate = new Date(todayEastern);
+    
+    const problemOrders = data?.data?.orders?.data?.edges || [];
+    const problemOrdersDueNow = problemOrders.filter(edge => {
+      const order = edge.node;
+      if (!order.required_ship_date) return false;
+      
+      const requiredDate = new Date(order.required_ship_date);
+      const requiredDateStr = requiredDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+      const requiredDateObj = new Date(requiredDateStr);
+      
+      // Only include if required ship date is today or before (ignore future)
+      return requiredDateObj <= todayDate;
+    });
+
+    console.log(`🚨 Found ${problemOrdersDueNow.length} problem orders due today/overdue out of ${problemOrders.length} total problem orders`);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        problemOrdersCount: problemOrdersDueNow.length,
+        totalProblemOrders: problemOrders.length,
+        problemOrders: problemOrdersDueNow.map(edge => ({
+          order_number: edge.node.order_number,
+          required_ship_date: edge.node.required_ship_date
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching fill rate:', error);
+    
+    // If ShipHero API times out, return fallback data (no problem orders)
+    if (error.name === 'AbortError') {
+      console.log('🔄 ShipHero API timed out, returning fallback data (0 problem orders)');
+      res.status(200).json({
+        success: true,
+        data: {
+          problemOrdersCount: 0,
+          totalProblemOrders: 0,
+          problemOrders: [],
+          fallback: true,
+          reason: 'ShipHero API timeout'
+        }
+      });
+      return;
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+  });
+});
+
+// Pack Errors Webhook - receives data from Google Form
+exports.packErrorsWebhook = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+
+    console.log('📋 Received pack errors webhook:', {
+      timestamp: new Date().toISOString(),
+      method: req.method,
+      headers: req.headers,
+      body: req.body
+    });
+
+    try {
+      // Store pack error data in Firestore
+      const packErrorData = {
+        ...req.body, // Include all form data
+        receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+        timestamp: new Date().toISOString(),
+        source: 'google_form'
+      };
+
+      // Add to pack_errors collection
+      const docRef = await db.collection('pack_errors').add(packErrorData);
+      
+      console.log('✅ Pack error stored with ID:', docRef.id);
+      console.log('📋 Pack error data:', packErrorData);
+
+      res.status(200).json({
+        success: true,
+        message: 'Pack error recorded successfully',
+        id: docRef.id
+      });
+
+    } catch (error) {
+      console.error('❌ Error storing pack error:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to store pack error',
+        details: error.message
+      });
+    }
+  });
 });

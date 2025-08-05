@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "superheroboardv2"
-  }
+  },
+  "targets": {
+    "superheroboardv2": {
+      "hosting": {
+        "data": [
+          "ecoshipdata"
+        ],
+        "default": [
+          "superheroboardv2"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }

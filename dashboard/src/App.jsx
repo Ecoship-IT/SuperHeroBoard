@@ -1,8 +1,8 @@
 import { useEffect, useState, useMemo, useCallback, memo } from 'react';
-import { Routes, Route, Link, useNavigate } from 'react-router-dom';
+import { Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom';
 import { db } from './firebase';
 import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, BarChart, Bar } from 'recharts';
 import EFMProductSizes from './EFMProductSizes';
 import PasswordGate from './PasswordGate';
 import AppWrapper from './AppWrapper';
@@ -108,7 +108,7 @@ const FilterSection = ({
           </select>
         </div>
         <div className="flex-1 min-w-[120px] sm:min-w-[140px] lg:min-w-[160px]">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Date Range</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Allocated Date Range</label>
           <select
             value={dateRangeValue}
             onChange={(e) => onDateRangeChange(e.target.value)}
@@ -162,6 +162,7 @@ const FilterSection = ({
 };
 
 export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
+  const location = useLocation();
   const [orders, setOrders] = useState([]);
   const [notReadyToShipOrders, setNotReadyToShipOrders] = useState([]);
   const [showAllClients, setShowAllClients] = useState(false);
@@ -172,6 +173,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [currentPage, setCurrentPage] = useState(1);
   const [todayPageSize, setTodayPageSize] = useState(25);
   const [todayCurrentPage, setTodayCurrentPage] = useState(1);
+  const [tomorrowPageSize, setTomorrowPageSize] = useState(25);
+  const [tomorrowCurrentPage, setTomorrowCurrentPage] = useState(1);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRefreshConfirming, setIsRefreshConfirming] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -196,6 +199,15 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [allOrdersSLAMet, setAllOrdersSLAMet] = useState('all');
   const [allOrdersSearch, setAllOrdersSearch] = useState('');
   const [allOrdersSearchInput, setAllOrdersSearchInput] = useState('');
+
+  // Tomorrow orders table filters
+  const [tomorrowOrdersClient, setTomorrowOrdersClient] = useState('all');
+  const [tomorrowOrdersStatus, setTomorrowOrdersStatus] = useState('all');
+  const [tomorrowOrdersDateRange, setTomorrowOrdersDateRange] = useState('all');
+  const [tomorrowOrdersCustomStartDate, setTomorrowOrdersCustomStartDate] = useState('');
+  const [tomorrowOrdersCustomEndDate, setTomorrowOrdersCustomEndDate] = useState('');
+  const [tomorrowOrdersSearch, setTomorrowOrdersSearch] = useState('');
+  const [tomorrowOrdersSearchInput, setTomorrowOrdersSearchInput] = useState('');
 
   // Add new state for trend view
   const [trendTimeframe, setTrendTimeframe] = useState('daily'); // 'daily', 'weekly', 'monthly'
@@ -333,7 +345,19 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const getRequiredShipDate = (order) => {
     // Check for ShipHero override first
     if (order && typeof order === 'object' && order.required_ship_date_override) {
-      return new Date(order.required_ship_date_override);
+      const overrideDate = new Date(order.required_ship_date_override);
+      
+      // Set time to 4:00 PM Eastern for override dates too
+      const year = overrideDate.getUTCFullYear();
+      const isDST = (date) => {
+        const jan = new Date(year, 0, 1).getTimezoneOffset();
+        const jul = new Date(year, 6, 1).getTimezoneOffset();
+        return Math.max(jan, jul) !== date.getTimezoneOffset();
+      };
+      const fourPMHourUTC = isDST(new Date()) ? 20 : 21;
+      overrideDate.setUTCHours(fourPMHourUTC, 0, 0, 0);
+      
+      return overrideDate;
     }
 
     // Fall back to allocated_at calculation
@@ -368,6 +392,10 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
       shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
+    
+    // Set time to 4:00 PM Eastern (20:00 UTC during DST, 21:00 UTC during EST)
+    const fourPMHourUTC = isDST(new Date()) ? 20 : 21;
+    shipDate.setUTCHours(fourPMHourUTC, 0, 0, 0);
     
     return shipDate;
   };
@@ -404,12 +432,32 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   }, [orders]);
 
   const shippedToday = useMemo(() => {
-    const todayString = new Date().toDateString();
+    const today = new Date();
+    const todayEastern = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+    
     return orders.filter(order => {
       if (order.status !== 'shipped' || !order.shippedAt) return false;
       try {
-        const shipDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        return shipDate.toDateString() === todayString;
+        // Inline UTC parsing to avoid circular dependency
+        let shipDate;
+        if (order.shippedAt.toDate) {
+          shipDate = order.shippedAt.toDate();
+        } else if (typeof order.shippedAt === 'string') {
+          // Handle UTC timestamps properly
+          let timeStr = order.shippedAt;
+          if (order.shippedAt.includes('T')) {
+            timeStr = order.shippedAt.replace('T', ' ');
+          }
+          shipDate = new Date(timeStr + ' UTC');
+        } else {
+          shipDate = new Date(order.shippedAt);
+        }
+        
+        if (!shipDate || isNaN(shipDate.getTime())) return false;
+        
+        // Compare using Eastern timezone like the hourly chart
+        const shipDateEastern = shipDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+        return shipDateEastern === todayEastern;
       } catch {
         return false;
       }
@@ -728,6 +776,19 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     );
   }, [sortedOrders, allOrdersClient, allOrdersStatus, allOrdersDateRange, allOrdersCustomStartDate, allOrdersCustomEndDate, allOrdersSLAMet, allOrdersSearch]);
 
+  const filteredTomorrowOrders = useMemo(() => {
+    return filterOrders(
+      ordersToShipTomorrow,
+      tomorrowOrdersClient,
+      tomorrowOrdersStatus,
+      tomorrowOrdersDateRange,
+      tomorrowOrdersCustomStartDate,
+      tomorrowOrdersCustomEndDate,
+      'all',
+      tomorrowOrdersSearch
+    );
+  }, [ordersToShipTomorrow, tomorrowOrdersClient, tomorrowOrdersStatus, tomorrowOrdersDateRange, tomorrowOrdersCustomStartDate, tomorrowOrdersCustomEndDate, tomorrowOrdersSearch]);
+
   // Optimize search with debouncing
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -743,6 +804,13 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     return () => clearTimeout(timer);
   }, [allOrdersSearchInput]);
 
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setTomorrowOrdersSearch(tomorrowOrdersSearchInput);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [tomorrowOrdersSearchInput]);
+
   const getHourlyShippingData = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -757,23 +825,69 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       };
     });
 
-    // Count orders for each hour
-    shippedToday.forEach(order => {
+    // Count orders for each hour (PROPERLY FIXED FOR EASTERN TIME)
+    console.log(`📊 Processing ${shippedToday.length} shipped orders for hourly chart`);
+    let processedCount = 0;
+    let filteredOutCount = 0;
+    
+    shippedToday.forEach((order, index) => {
       try {
-        const shippedTime = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        const hour = shippedTime.getHours();
+        // Inline UTC parsing to avoid circular dependency
+        let shippedTime;
+        if (!order.shippedAt) {
+          console.log(`⚠️ Order ${index}: No shipped time`);
+          return;
+        }
         
-        // Only count orders between 7 AM and 3 PM
-        if (hour >= 7 && hour <= 15) {
-          const index = hour - 7;
+        if (order.shippedAt.toDate) {
+          shippedTime = order.shippedAt.toDate();
+        } else if (typeof order.shippedAt === 'string') {
+          // Handle UTC timestamps properly
+          let timeStr = order.shippedAt;
+          if (order.shippedAt.includes('T')) {
+            timeStr = order.shippedAt.replace('T', ' ');
+          }
+          shippedTime = new Date(timeStr + ' UTC');
+        } else {
+          shippedTime = new Date(order.shippedAt);
+        }
+        
+        if (!shippedTime || isNaN(shippedTime.getTime())) {
+          console.log(`⚠️ Order ${index}: Invalid shipped time`);
+          return;
+        }
+        
+        // Get Eastern hour using toLocaleString
+        const easternHour = parseInt(shippedTime.toLocaleString('en-US', {
+          timeZone: 'America/New_York',
+          hour: 'numeric',
+          hour12: false
+        }));
+        
+        // Debug first few orders
+        if (index < 5) {
+          console.log(`📦 Order ${index}: ${order.order_number} shipped at ${shippedTime.toISOString()} = ${easternHour}:00 Eastern`);
+        }
+        
+        // Only count orders between 7 AM and 3 PM (Eastern time)
+        if (easternHour >= 7 && easternHour <= 15) {
+          const index = easternHour - 7;
           if (hourlyData[index]) {
             hourlyData[index].orders++;
+            processedCount++;
+          }
+        } else {
+          filteredOutCount++;
+          if (index < 5) {
+            console.log(`⏰ Order ${index}: Filtered out (hour ${easternHour} outside 7-15 range)`);
           }
         }
       } catch (error) {
         console.error('Error processing order:', error);
       }
     });
+    
+    console.log(`✅ Processed ${processedCount} orders, filtered out ${filteredOutCount} orders (outside 7AM-3PM)`);
 
     return hourlyData;
   }, [shippedToday]);
@@ -795,13 +909,20 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     // If it's a Firestore timestamp, use toDate()
     if (timestamp.toDate) return timestamp.toDate();
     
-    // If it's a string in ShipHero format (YYYY-MM-DD HH:MM:SS)
-    if (typeof timestamp === 'string' && timestamp.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)) {
-      // ShipHero sends timestamps in UTC, so append UTC timezone
-      return new Date(timestamp + ' UTC');
+    // ShipHero sends timestamps in UTC format without timezone info
+    // We need to parse as UTC and let the display formatter handle Eastern conversion
+    if (typeof timestamp === 'string') {
+      // Handle both formats: "2024-01-15 10:30:00" and "2024-01-15T10:30:00"
+      let timeStr = timestamp;
+      if (timestamp.includes('T')) {
+        timeStr = timestamp.replace('T', ' ');
+      }
+      
+      // Parse as UTC since ShipHero sends UTC timestamps
+      return new Date(timeStr + ' UTC');
     }
     
-    // Fallback for any other format - assume UTC if no timezone specified
+    // Fallback
     return new Date(timestamp);
   }, []);
 
@@ -1107,12 +1228,77 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     };
   }, [orders, trendTimeframe]);
 
+  // Get hourly allocation data for orders coming in (24 hours)
+  const getHourlyAllocationData = useMemo(() => {
+    // Initialize data array with all 24 hours
+    const hourlyData = Array.from({ length: 24 }, (_, index) => ({
+      hour: `${index === 0 ? '12 AM' : index === 12 ? '12 PM' : index > 12 ? `${index - 12} PM` : `${index} AM`}`,
+      orders: 0,
+      hourNumber: index
+    }));
+
+    // Count orders allocated today by hour (PROPERLY FIXED FOR EASTERN TIME)
+    const today = new Date();
+    const todayEastern = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+
+    orders.forEach(order => {
+      try {
+        if (!order.allocated_at) return;
+        
+        // Inline UTC parsing to avoid circular dependency
+        let allocatedTime;
+        if (order.allocated_at.toDate) {
+          allocatedTime = order.allocated_at.toDate();
+        } else if (typeof order.allocated_at === 'string') {
+          // Handle UTC timestamps properly
+          let timeStr = order.allocated_at;
+          if (order.allocated_at.includes('T')) {
+            timeStr = order.allocated_at.replace('T', ' ');
+          }
+          allocatedTime = new Date(timeStr + ' UTC');
+        } else {
+          allocatedTime = new Date(order.allocated_at);
+        }
+        
+        if (!allocatedTime || isNaN(allocatedTime.getTime())) return;
+        
+        // Convert to Eastern time for comparison
+        const allocatedEastern = allocatedTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+        
+        // Only count orders from today (Eastern time)
+        if (allocatedEastern === todayEastern) {
+          // Get Eastern hour using toLocaleString
+          const easternHour = parseInt(allocatedTime.toLocaleString('en-US', {
+            timeZone: 'America/New_York',
+            hour: 'numeric',
+            hour12: false
+          }));
+          
+          if (hourlyData[easternHour]) {
+            hourlyData[easternHour].orders++;
+          }
+        }
+      } catch (error) {
+        console.error('Error processing allocation time:', error);
+      }
+    });
+
+    // Calculate average and add to each data point
+    const totalOrders = hourlyData.reduce((sum, hour) => sum + hour.orders, 0);
+    const average = totalOrders / 24;
+    
+    return hourlyData.map(hour => ({
+      ...hour,
+      average: average
+    }));
+  }, [orders]);
+
   return (
     <div className="relative min-h-screen">
-      {/* Hamburger Menu Button */}
+      {/* Hamburger Menu Button - Desktop only */}
       <button 
         onClick={() => setIsSidebarOpen(true)}
-        className="fixed top-4 left-4 z-50 p-2 rounded-md hover:bg-gray-100 transition-colors duration-200"
+        className="hidden md:block fixed top-4 left-4 z-50 p-2 rounded-md hover:bg-gray-100 transition-colors duration-200"
       >
         <svg 
           className="w-6 h-6 text-gray-700" 
@@ -1139,9 +1325,13 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
 
       {/* Sidebar */}
       <div 
-        className={`fixed top-0 left-0 h-full w-96 bg-white shadow-lg transform transition-transform duration-300 ease-in-out z-50 ${
+        className={`fixed top-0 left-0 w-96 bg-white shadow-lg transform transition-transform duration-300 ease-in-out z-50 overflow-y-auto ${
           isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
+        style={{ 
+          height: '100dvh',
+          maxHeight: '100vh'
+        }}
       >{/* This is the X in the sidebar */}
         <div className="bg-gray-800 pl-6 pr-8 pt-4 pb-5 mb-4 relative">
           <button
@@ -1191,6 +1381,28 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 <span>SuperHero Board</span>
               </div>
             </a>
+            {/* Temporarily hidden Level Up Log */}
+            {/* <Link 
+              to="/level-up-log" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                  />
+                </svg>
+                <span>Level Up Log</span>
+              </div>
+            </Link> */}
             {isAuthenticated && userRole === 'admin' && (
               <Link 
                 to="/efm-product-sizes" 
@@ -1214,8 +1426,29 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </div>
               </Link>
             )}
-            <a 
-              href="#" 
+            <Link 
+              to="/location-builder" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+                  />
+                </svg>
+                <span>Location Builder</span>
+              </div>
+            </Link>
+            <Link 
+              to="/compliance-board" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
               <div className="flex items-center space-x-2">
@@ -1234,7 +1467,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </svg>
                 <span>Compliance Board</span>
               </div>
-            </a>
+            </Link>
           </nav>
           
           {/* Logout Button at Bottom */}
@@ -1272,14 +1505,128 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       </div>
 
       <div className="w-full md:w-[90%] lg:w-[85%] mx-auto px-4 font-sans">
-        <div className="relative pt-10">
+        <>
+          {/* Mobile Header Row - Only visible on mobile */}
+          <div className="block md:hidden pt-4 pb-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {/* Mobile Hamburger Button */}
+                <button 
+                  onClick={() => setIsSidebarOpen(true)}
+                  className="p-2 rounded-md hover:bg-gray-100 transition-colors duration-200"
+                >
+                  <svg 
+                    className="w-6 h-6 text-gray-700" 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path 
+                      strokeLinecap="round" 
+                      strokeLinejoin="round" 
+                      strokeWidth={2} 
+                      d="M4 6h16M4 12h16M4 18h16" 
+                    />
+                  </svg>
+                </button>
+                {/* Mobile Count/Status toggle */}
+                <div className="flex items-center bg-gray-200 rounded-full p-1">
+                  <Link
+                    to="/"
+                    className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-all duration-200 ${
+                      location.pathname === '/' 
+                        ? 'text-white shadow-sm' 
+                        : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+                    }`}
+                    style={location.pathname === '/' ? { backgroundColor: '#16a34a' } : {}}
+                  >
+                    Count
+                  </Link>
+                  <Link
+                    to="/superhero-alt"
+                    className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-all duration-200 ${
+                      location.pathname === '/superhero-alt' 
+                        ? 'text-white shadow-sm' 
+                        : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+                    }`}
+                    style={location.pathname === '/superhero-alt' ? { backgroundColor: '#16a34a' } : {}}
+                  >
+                    Status
+                  </Link>
+                </div>
+              </div>
+              {/* Refresh button for mobile */}
+              {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
+                <button
+                  onClick={() => {
+                    if (isRefreshing) return;
+                    
+                    if (!isRefreshConfirming) {
+                      setIsRefreshConfirming(true);
+                      setRefreshLog([]); // Clear previous logs
+                      const timer = setTimeout(() => {
+                        setIsRefreshConfirming(false);
+                      }, 5000);
+                      return () => clearTimeout(timer);
+                    }
+                    
+                    // Get orders that need to be shipped today
+                    const ordersToVerify = orders.filter(order => 
+                      needsShippedToday(order) &&
+                      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
+                      order.ready_to_ship === true
+                    );
+
+                    // Get orders from not_ready_to_ship that need to be rechecked
+                    const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
+                      needsShippedToday(order)
+                    );
+
+                    processOrders(ordersToVerify, notReadyOrdersToVerify);
+                  }}
+                  disabled={isRefreshing}
+                  className={`px-3 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm text-sm ${
+                    isRefreshing ? 'bg-blue-600 opacity-75 cursor-not-allowed' :
+                    isRefreshConfirming ? 'bg-red-600 hover:bg-red-700 text-white' : 
+                    'bg-slate-700 hover:bg-slate-800 text-white'
+                  }`}
+                >
+                  <svg 
+                    className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path 
+                      strokeLinecap="round" 
+                      strokeLinejoin="round" 
+                      strokeWidth={2} 
+                      d={isRefreshing ? 
+                        "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" :
+                        isRefreshConfirming ?
+                        "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" :
+                        "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                      }
+                    />
+                  </svg>
+                  {isRefreshing ? 
+                    'Refreshing' : 
+                    isRefreshConfirming ? 'Sure?' : 
+                    'Refresh'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Desktop Layout - Hidden on mobile */}
+          <div className="hidden md:block relative pt-10">
           <div className="text-center">
             <h1 className="text-6xl font-extrabold tracking-tight text-slate-800 mb-2">⚡ SuperHero Board ⚡</h1>
             <p className="text-slate-500 text-lg font-medium mb-8 pt-2">
               Real-time order overview for when <i>ship</i> gets real
             </p>
           </div>
-          {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
+            {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
             <button
               onClick={() => {
                 if (isRefreshing) return;
@@ -1338,6 +1685,17 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 'Refresh Orders'}
             </button>
           )}
+          </div>
+
+          {/* Mobile Title - Only visible on mobile */}
+          <div className="block md:hidden text-center pt-4 pb-8">
+            <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-slate-800 mb-2">⚡ SuperHero Board ⚡</h1>
+            <p className="text-slate-500 text-base font-medium">
+              Real-time order overview for when <i>ship</i> gets real
+            </p>
+          </div>
+
+          {/* Shared refresh log for both mobile and desktop */}
           {isRefreshing && refreshLog.length > 0 && (
             <div className="fixed bottom-4 right-4 w-96 max-h-96 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
               <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-3">
@@ -1350,18 +1708,18 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
               </div>
             </div>
           )}
-        </div>
+        </>
 
-        <div className="flex flex-col md:flex-row items-start gap-12 mt-10 pt-5">
+        <div className="flex flex-col md:flex-row items-start gap-6 md:gap-12 mt-6 md:mt-10 pt-2 md:pt-5">
           <div className="flex flex-col justify-start pt-2 flex-[1.6]">
-            <div className="text-9xl font-extrabold text-slate-900 mb-2 text-left">{ordersToShipToday.length}</div>
-            <div className="text-4xl text-slate-700 font-medium text-left mb-1">🚚 Needs shipped today</div>
-            <div className="text-9xl font-extrabold text-slate-800 mb-2 text-left pt-10">
+            <div className="text-6xl md:text-9xl font-extrabold text-slate-900 mb-2 text-left">{ordersToShipToday.length}</div>
+            <div className="text-2xl md:text-4xl text-slate-700 font-medium text-left mb-1">🚚 Needs shipped today</div>
+            <div className="text-6xl md:text-9xl font-extrabold text-slate-800 mb-2 text-left pt-6 md:pt-10">
               {shippedToday.length}
             </div>
-            <div className="text-4xl text-slate-600 font-medium text-left mb-1">🎉 Shipped today</div>
-            <div className="text-9xl font-extrabold text-slate-700 mb-2 text-left pt-10">{ordersToShipTomorrow.length}</div>
-            <div className="text-4xl text-slate-500 font-medium text-left mb-1">📅 Needs shipped tomorrow</div>
+            <div className="text-2xl md:text-4xl text-slate-600 font-medium text-left mb-1">🎉 Shipped today</div>
+            <div className="text-6xl md:text-9xl font-extrabold text-slate-700 mb-2 text-left pt-6 md:pt-10">{ordersToShipTomorrow.length}</div>
+            <div className="text-2xl md:text-4xl text-slate-500 font-medium text-left mb-1 pb-8 md:pb-12">📅 Needs shipped tomorrow</div>
           </div>
 
           <div className="flex-[1.4] w-full h-full">
@@ -1393,8 +1751,9 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </div>
               </div>
 
-              <div className="mt-8">
-                <div className="flex items-center justify-between">
+              <div className="mt-8 mb-4">
+                {/* Desktop layout - side by side */}
+                <div className="hidden md:flex items-center justify-between">
                   <div className="flex items-center">
                     <div className="relative w-[300px] h-[300px] p-4">
                         <ResponsiveContainer width="100%" height="100%">
@@ -1434,17 +1793,59 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                     </div>
                     <div className="flex flex-col items-start gap-6 ml-8">
                       <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 rounded-full" style={{ backgroundColor: COLORS[1] }}></div>
-                        <div className="text-3xl text-slate-800">
-                          Unshipped Orders
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
                         <div className="w-5 h-5 rounded-full" style={{ backgroundColor: COLORS[0] }}></div>
                         <div className="text-3xl text-slate-800">
                           Shipped Orders
                         </div>
                       </div>
+                      <div className="flex items-center gap-3">
+                        <div className="w-5 h-5 rounded-full" style={{ backgroundColor: COLORS[1] }}></div>
+                        <div className="text-3xl text-slate-800">
+                          Unshipped Orders
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Mobile layout - bigger chart, no external labels */}
+                <div className="block md:hidden">
+                  <div className="flex justify-center">
+                    <div className="relative w-full max-w-[350px] h-[350px] p-2">
+                        <ResponsiveContainer width="100%" height="100%">
+                        <PieChart margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+                            <Pie 
+                              data={pieData} 
+                              dataKey="value" 
+                              nameKey="name" 
+                            outerRadius={140} 
+                            innerRadius={70}
+                              isAnimationActive={true}
+                              label={({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
+                                const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
+                                const x = cx + radius * Math.cos(-midAngle * (Math.PI / 180));
+                                const y = cy + radius * Math.sin(-midAngle * (Math.PI / 180));
+                                return (
+                                  <text
+                                    x={x}
+                                    y={y}
+                                    fill="white"
+                                    textAnchor="middle"
+                                    dominantBaseline="middle"
+                                    className="text-lg font-bold"
+                                  >
+                                    {`${(percent * 100).toFixed(0)}%`}
+                                  </text>
+                                );
+                              }}
+                              labelLine={false}
+                            >
+                              {pieData.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={COLORS[index]} />
+                              ))}
+                            </Pie>
+                          </PieChart>
+                        </ResponsiveContainer>
                     </div>
                   </div>
                 </div>
@@ -1453,7 +1854,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
           </div>
         </div>
 
-        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-40 mb-10">
+        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 md:mt-40 mb-10">
           <div className="bg-gradient-to-r from-teal-600 to-teal-800 p-6">
             <h2 className="text-2xl font-bold text-white">Today's Shipping Activity</h2>
             <p className="text-teal-100 mt-1">Hourly breakdown of shipped orders</p>
@@ -1639,6 +2040,75 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
           </div>
         </div>
 
+        {/* Hourly Order Allocation Chart */}
+        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
+          <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
+            <h2 className="text-2xl font-bold text-white">Today's Order Allocation by Hour</h2>
+            <p className="text-blue-100 mt-1">Number of orders allocated each hour (24-hour view)</p>
+          </div>
+          <div className="p-6">
+            <div className="w-full h-[400px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={getHourlyAllocationData}
+                  margin={{
+                    top: 20,
+                    right: 30,
+                    left: 20,
+                    bottom: 20,
+                  }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                  <XAxis 
+                    dataKey="hour"
+                    stroke="#6B7280"
+                    tick={{ fill: '#374151', fontSize: 12 }}
+                    tickLine={{ stroke: '#6B7280' }}
+                    angle={-45}
+                    textAnchor="end"
+                    height={60}
+                    interval={0}
+                  />
+                  <YAxis
+                    stroke="#6B7280"
+                    tick={{ fill: '#374151' }}
+                    tickLine={{ stroke: '#6B7280' }}
+                  />
+                                     <Tooltip 
+                     content={({ active, payload, label }) => {
+                       if (active && payload && payload.length) {
+                         return (
+                           <div className="bg-white p-4 shadow-lg rounded-lg border border-gray-200">
+                             <p className="text-gray-600">{`Hour: ${label}`}</p>
+                             <p className="text-blue-600 font-bold">{`Orders Allocated: ${payload[0].value}`}</p>
+                             <p className="text-orange-600">{`Average: ${Math.round(payload[1]?.value * 10) / 10}`}</p>
+                           </div>
+                         );
+                       }
+                       return null;
+                     }}
+                   />
+                   <Legend />
+                   <Bar
+                     dataKey="orders"
+                     name="Orders Allocated"
+                     fill="#2563EB"
+                     radius={[4, 4, 0, 0]}
+                   />
+                   <Line
+                     type="monotone"
+                     dataKey="average"
+                     name="Daily Average"
+                     stroke="#EA580C"
+                     strokeWidth={3}
+                     strokeDasharray="5 5"
+                     dot={false}
+                   />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
         <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
           <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
             <div className="flex justify-between items-start">
@@ -1984,6 +2454,161 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
             currentPage={currentPage}
             setCurrentPage={setCurrentPage}
             setPageSize={setPageSize}
+          />
+        </div>
+
+        {/* Needs Shipped Tomorrow Section */}
+        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
+          <div className="bg-gradient-to-r from-orange-600 to-orange-800 p-6">
+            <div className="flex justify-between items-start">
+              <div>
+                <h2 className="text-2xl font-bold text-white">Orders To Ship Tomorrow</h2>
+                <p className="text-orange-100 mt-1">Orders scheduled for tomorrow's shipment</p>
+              </div>
+              <button 
+                onClick={() => exportToCSV(filteredTomorrowOrders, `orders_to_ship_tomorrow_${new Date().toISOString().split('T')[0]}.csv`)}
+                className="bg-white text-orange-700 hover:bg-orange-50 px-4 py-2 rounded-lg shadow-sm transition-colors duration-150 flex items-center space-x-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <span>Export to CSV</span>
+              </button>
+            </div>
+          </div>
+          <FilterSection
+            clientValue={tomorrowOrdersClient}
+            onClientChange={setTomorrowOrdersClient}
+            statusValue={tomorrowOrdersStatus}
+            onStatusChange={setTomorrowOrdersStatus}
+            dateRangeValue={tomorrowOrdersDateRange}
+            onDateRangeChange={setTomorrowOrdersDateRange}
+            customStart={tomorrowOrdersCustomStartDate}
+            onCustomStartChange={setTomorrowOrdersCustomStartDate}
+            customEnd={tomorrowOrdersCustomEndDate}
+            onCustomEndChange={setTomorrowOrdersCustomEndDate}
+            slaValue={'all'}
+            onSLAChange={() => {}}
+            showSLA={false}
+            searchValue={tomorrowOrdersSearch}
+            onSearchChange={setTomorrowOrdersSearch}
+            searchInputValue={tomorrowOrdersSearchInput}
+            onSearchInputChange={setTomorrowOrdersSearchInput}
+            searchPlaceholder="Search by order number..."
+            uniqueClients={uniqueClients}
+            statusOptions={statusOptions}
+            dateRangeOptions={dateRangeOptions}
+            slaOptions={slaOptions}
+          />
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <span className="flex items-center space-x-2">
+                      <span>Order #</span>
+                      <svg className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" viewBox="0 0 20 20" fill="currentColor">
+                        <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </span>
+                  </th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Webhook Type</th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Line Items</th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocated At</th>
+                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Required Ship Date</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {paginateData(filteredTomorrowOrders, tomorrowPageSize, tomorrowCurrentPage).map((order, idx) => (
+                  <tr 
+                    key={order.id} 
+                    className={`
+                      ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
+                      hover:bg-orange-50 transition-colors duration-150 ease-in-out
+                    `}
+                  >
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-orange-600">{order.order_number}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{accountMap[order.account_uuid] || order.account_uuid || 'Unknown'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{order.webhook_type || 'Order Allocated'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800">
+                        {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {(() => { 
+                        try { 
+                          if (!order.allocated_at) return '—'; 
+                          const date = parseShipHeroTimestamp(order.allocated_at);
+                          return new Intl.DateTimeFormat('en-US', {
+                            timeZone: 'America/New_York',
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: true
+                          }).format(date);
+                        } catch { 
+                          return '—'; 
+                        } 
+                      })()}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {(() => { 
+                        try { 
+                          const reqDate = getRequiredShipDate(order);
+                          if (!reqDate) return '—';
+                          const dateStr = new Intl.DateTimeFormat('en-US', {
+                            timeZone: 'America/New_York',
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: true
+                          }).format(reqDate);
+                          
+                          // Add indicator if using ShipHero override
+                          if (order.required_ship_date_override) {
+                            return (
+                              <div className="flex items-center gap-1">
+                                <span>{dateStr}</span>
+                                <span 
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
+                                  title="Date from ShipHero override"
+                                >
+                                  SH
+                                </span>
+                              </div>
+                            );
+                          }
+                          return dateStr;
+                        } catch { 
+                          return '—'; 
+                        } 
+                      })()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="bg-gray-50">
+                <tr>
+                  <td colSpan="6" className="px-6 py-4">
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <Pagination
+            total={filteredTomorrowOrders.length}
+            pageSize={tomorrowPageSize}
+            currentPage={tomorrowCurrentPage}
+            setCurrentPage={setTomorrowCurrentPage}
+            setPageSize={setTomorrowPageSize}
           />
         </div>
 

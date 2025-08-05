@@ -664,6 +664,28 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 <span>SuperHero Board</span>
               </div>
             </Link>
+            {/* Temporarily hidden Level Up Log */}
+            {/* <Link 
+              to="/level-up-log" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+                  />
+                </svg>
+                <span>Level Up Log</span>
+              </div>
+            </Link> */}
             <Link 
               to="/efm-product-sizes" 
               className="block px-6 py-3 text-gray-700 bg-blue-50 border-blue-200 rounded-lg transition-all duration-200 text-lg font-semibold border shadow-sm"
@@ -685,8 +707,29 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 <span>EFM Product Sizes</span>
               </div>
             </Link>
-            <a 
-              href="#" 
+            <Link 
+              to="/location-builder" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+                  />
+                </svg>
+                <span>Location Builder</span>
+              </div>
+            </Link>
+            <Link 
+              to="/compliance-board" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
               <div className="flex items-center space-x-2">
@@ -705,7 +748,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 </svg>
                 <span>Compliance Board</span>
               </div>
-            </a>
+            </Link>
           </nav>
           
           {/* Logout Button at Bottom */}
