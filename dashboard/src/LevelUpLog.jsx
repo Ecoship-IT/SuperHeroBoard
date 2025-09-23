@@ -28,6 +28,8 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
       // Switch case to redirect to different Google Sheets based on pin
       let redirectUrl;
       
+      // COMMENTED OUT FOR ROLLOUT CONTROL - UNCOMMENT PEOPLE AS NEEDED
+      /*
       switch (inputValue.trim()) {
         case '3681':
           // Tara Bare
@@ -178,6 +180,13 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
           setTimeout(() => setSubmitMessage(''), 5000);
           return; // Exit early, don't redirect
       }
+      */
+      
+      // TEMPORARILY DISABLED - NO PINS WORK UNTIL ROLLOUT
+      setSubmitMessage('❌ Level Up Log is not yet available. Please wait for rollout.');
+      setTimeout(() => setSubmitMessage(''), 5000);
+      setIsSubmitting(false);
+      return;
       
       // If we get here, we have a valid pin and URL - redirect
       console.log('Redirecting to:', redirectUrl);
@@ -201,7 +210,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   };
 
   return (
-    <div className="relative min-h-screen bg-gray-50">
+    <div className="relative bg-gray-50">
       {/* Hamburger Menu Row */}
       <div className="w-full p-4 pb-0">
         <button 
@@ -420,7 +429,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
 
         {/* Main Form */}
         <div className="max-w-md mx-auto">
-        <div className="bg-white rounded-xl shadow-lg p-6">
+          <div className="bg-white rounded-xl shadow-lg p-6">
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Number Input */}
             <div>
@@ -473,35 +482,51 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
               {submitMessage}
             </div>
           )}
+
+          {/* Shipping Tips Button - Now positioned under submit for better visibility */}
+          <button
+            onClick={() => setShowShippingTips(true)}
+            className="mt-2 w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg shadow-lg transition-all duration-200 text-base"
+          >
+            💡 Get Tips for Shipping
+          </button>
         </div>
         </div>
       </div>
 
-      {/* Shipping Tips Button - Fixed position for mobile visibility */}
-      <button
-        onClick={() => setShowShippingTips(true)}
-        className="fixed bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg shadow-lg transition-all duration-200 z-40 text-sm"
-      >
-        💡 Get Tips for Shipping
-      </button>
-
       {/* Shipping Tips Modal */}
       {showShippingTips && (
         <div 
-          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 sm:p-6"
           onClick={() => setShowShippingTips(false)}
         >
           <div 
-            className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[85vh] sm:max-h-[90vh] relative flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal Header */}
-            <div className="bg-blue-600 text-white px-6 py-4 rounded-t-lg text-center">
-              <h2 className="text-xl font-bold">Shipping Tips</h2>
+            {/* Modal Header - Sticky */}
+            <div className="bg-blue-600 text-white px-6 py-4 rounded-t-lg text-center relative flex-shrink-0">
+              <h2 className="text-xl font-bold">Level Up Your Shipping</h2>
+              
+              {/* Modal Close Button */}
+              <button
+                onClick={() => setShowShippingTips(false)}
+                className="absolute top-4 right-4 text-white hover:text-gray-200 transition-colors z-10"
+                aria-label="Close modal"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
 
-            {/* Modal Content */}
-            <div className="p-6 space-y-4">
+            {/* Modal Content - Scrollable */}
+            <div className="p-6 pb-8 space-y-4 overflow-y-auto flex-1">
+              {/* Main Title */}
+              <div>
+                <h3 className="text-xl font-bold text-gray-800 mb-3">Shipping Tips</h3>
+              </div>
+
               <div>
                 <h4 className="font-semibold text-gray-800 mb-2">Ship by store/order type:</h4>
                 <ul className="space-y-1 text-gray-700 ml-4">
@@ -533,15 +558,38 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                 </ul>
               </div>
 
-            {/* Modal Footer */}
-            <div className="bg-gray-50 px-6 py-4 rounded-b-lg">
-              <button
-                onClick={() => setShowShippingTips(false)}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded transition-colors"
-              >
-                Got it!
-              </button>
-            </div>
+              {/* Video Section - YouTube Embed */}
+              <div className="border-t pt-4">
+                <h4 className="text-lg font-bold text-gray-800 mb-3">🎥 See it in action</h4>
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
+                    <iframe
+                      className="absolute top-0 left-0 w-full h-full rounded-lg"
+                      src="https://www.youtube.com/embed/qXqej_Gyyjc"
+                      title="Shipping Tips Video"
+                      frameBorder="0"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Google Form Section */}
+              <div className="border-t pt-4">
+                <h4 className="text-lg font-bold text-gray-800 mb-3">📝 Need additional help?</h4>
+                <p className= "mb-3 text-sm">
+                  Fill out this form to receive personalized help and advice from a lead.
+                </p>
+                <a
+                  href="https://docs.google.com/forms/d/e/1FAIpQLSc41oxYgD0Gj6tLJsIyuOcg3bthPdVmaf2hj02n3WUCrKJk6Q/viewform?usp=header"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg text-center transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
+                >
+                  📋 Open Form
+                </a>
+              </div>
             </div>
           </div>
         </div>

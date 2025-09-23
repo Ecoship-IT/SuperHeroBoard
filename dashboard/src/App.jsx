@@ -293,13 +293,106 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     return () => clearInterval(interval);
   }, []);
 
+  // Helper function to check if a date is a US federal holiday
+  const isBankHoliday = (date) => {
+    const year = date.getFullYear();
+    const month = date.getMonth(); // 0-based
+    const day = date.getDate();
+    const dayOfWeek = date.getDay(); // 0 = Sunday
+    
+    // Helper to get nth weekday of month (e.g., 3rd Monday)
+    const getNthWeekday = (year, month, weekday, n) => {
+      const firstDay = new Date(year, month, 1);
+      const firstWeekday = firstDay.getDay();
+      const offset = (weekday - firstWeekday + 7) % 7;
+      return new Date(year, month, 1 + offset + (n - 1) * 7);
+    };
+    
+    // Helper to get last weekday of month (e.g., last Monday of May)
+    const getLastWeekday = (year, month, weekday) => {
+      const lastDay = new Date(year, month + 1, 0); // Last day of month
+      const lastWeekday = lastDay.getDay();
+      const offset = (lastWeekday - weekday + 7) % 7;
+      return new Date(year, month, lastDay.getDate() - offset);
+    };
+    
+    // Check each federal holiday
+    const holidays = [
+      // New Year's Day - January 1
+      new Date(year, 0, 1),
+      
+      // Martin Luther King Jr. Day - 3rd Monday in January
+      getNthWeekday(year, 0, 1, 3),
+      
+      // Presidents' Day - 3rd Monday in February
+      getNthWeekday(year, 1, 1, 3),
+      
+      // Memorial Day - Last Monday in May
+      getLastWeekday(year, 4, 1),
+      
+      // Juneteenth - June 19
+      new Date(year, 5, 19),
+      
+      // Independence Day - July 4
+      new Date(year, 6, 4),
+      
+      // Labor Day - 1st Monday in September
+      getNthWeekday(year, 8, 1, 1),
+      
+      // Columbus Day - 2nd Monday in October
+      getNthWeekday(year, 9, 1, 2),
+      
+      // Veterans Day - November 11
+      new Date(year, 10, 11),
+      
+      // Thanksgiving - 4th Thursday in November
+      getNthWeekday(year, 10, 4, 4),
+      
+      // Christmas Day - December 25
+      new Date(year, 11, 25)
+    ];
+    
+    // Check if current date matches any holiday
+    const isHoliday = holidays.some(holiday => 
+      holiday.getFullYear() === year &&
+      holiday.getMonth() === month &&
+      holiday.getDate() === day
+    );
+    
+    // Debug logging for dates around July 4th
+    if (month === 6 && day >= 1 && day <= 7) { // July 1-7
+      if (isHoliday) {
+        const matchingHoliday = holidays.find(holiday => 
+          holiday.getFullYear() === year &&
+          holiday.getMonth() === month &&
+          holiday.getDate() === day
+        );
+      }
+    }
+    
+    return isHoliday;
+  };
+
   const needsShippedToday = (order) => {
     // Check for ShipHero override first
     if (order && typeof order === 'object' && order.ship_today_override !== undefined) {
       return order.ship_today_override;
     }
 
-    // Fall back to allocated_at calculation
+    // Check if order is overdue (past its required ship date)
+    const requiredShipDate = getRequiredShipDate(order);
+    if (requiredShipDate) {
+      const today = new Date();
+      const todayStr = today.toISOString().split('T')[0];
+      const requiredDateStr = requiredShipDate.toISOString().split('T')[0];
+      
+      // If required ship date is today or in the past, and order hasn't shipped, it needs to ship today
+      if (requiredDateStr <= todayStr && !order.shippedAt) {
+        return true;
+      }
+    }
+
+    // Fall back to allocated_at calculation for orders not yet overdue
     const allocatedAt = order && typeof order === 'object' ? order.allocated_at : order;
     if (!allocatedAt) return false;
     
@@ -330,8 +423,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     
-    // Skip weekends
-    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+    // Skip weekends and holidays
+    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0 || isBankHoliday(shipDate)) {
       shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     
@@ -424,9 +517,68 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     );
   }, [orders]);
 
+  const needsShippedTomorrow = (order) => {
+    // Check for ShipHero override first
+    if (order && typeof order === 'object' && order.ship_tomorrow_override !== undefined) {
+      return order.ship_tomorrow_override;
+    }
+
+    // Fall back to allocated_at calculation
+    const allocatedAt = order && typeof order === 'object' ? order.allocated_at : order;
+    if (!allocatedAt) return false;
+    
+    const alloc = allocatedAt.toDate ? allocatedAt.toDate() : new Date(allocatedAt);
+    
+    // Work entirely in UTC to avoid timezone conversion issues
+    const allocUTC = new Date(alloc);
+    
+    // Get the date in Eastern time for determining the cutoff
+    // 8 AM EST = 13:00 UTC (during EST months Nov-Mar)
+    // 8 AM EDT = 12:00 UTC (during EDT months Mar-Nov)
+    // We'll check if we're in DST using a reliable method
+    const year = allocUTC.getUTCFullYear();
+    const isDST = (date) => {
+      const jan = new Date(year, 0, 1).getTimezoneOffset();
+      const jul = new Date(year, 6, 1).getTimezoneOffset();
+      return Math.max(jan, jul) !== date.getTimezoneOffset();
+    };
+    
+    // Create cutoff: 8 AM Eastern = 12 UTC (DST) or 13 UTC (EST)
+    const cutoffHourUTC = isDST(new Date()) ? 12 : 13;
+    const cutoffUTC = new Date(allocUTC);
+    cutoffUTC.setUTCHours(cutoffHourUTC, 0, 0, 0);
+    
+    const isBeforeCutoff = allocUTC < cutoffUTC;
+    let shipDate = new Date(allocUTC);
+    if (!isBeforeCutoff) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+    }
+    
+    // Skip weekends and holidays
+    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0 || isBankHoliday(shipDate)) {
+      shipDate.setUTCDate(shipDate.getUTCDate() + 1);
+    }
+    
+    // Get tomorrow's date (next business day)
+    const today = new Date();
+    let tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    // Skip weekends and holidays for tomorrow calculation
+    while (tomorrow.getDay() === 6 || tomorrow.getDay() === 0 || isBankHoliday(tomorrow)) {
+      tomorrow.setDate(tomorrow.getDate() + 1);
+    }
+    
+    // Compare just the date portion (UTC)
+    const shipDateStr = shipDate.toISOString().split('T')[0];
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+    
+    return shipDateStr === tomorrowStr;
+  };
+
   const ordersToShipTomorrow = useMemo(() => {
     return orders.filter(order =>
-      !needsShippedToday(order) &&
+      needsShippedTomorrow(order) &&
       !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
       order.ready_to_ship === true
     );
@@ -826,17 +978,23 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       };
     });
 
-    // Count orders for each hour (PROPERLY FIXED FOR EASTERN TIME)
-    console.log(`📊 Processing ${shippedToday.length} shipped orders for hourly chart`);
+    // Count orders for each hour (PROPERLY FIXED FOR EASTERN TIME) - OPTIMIZED
     let processedCount = 0;
     let filteredOutCount = 0;
     
-    shippedToday.forEach((order, index) => {
+    // Early exit if no orders
+    if (shippedToday.length === 0) {
+      return hourlyData;
+    }
+    
+    // Limit processing to last 1000 orders for performance
+    const ordersToProcess = shippedToday.slice(0, 1000);
+    
+    ordersToProcess.forEach((order) => {
       try {
         // Inline UTC parsing to avoid circular dependency
         let shippedTime;
         if (!order.shippedAt) {
-          console.log(`⚠️ Order ${index}: No shipped time`);
           return;
         }
         
@@ -854,7 +1012,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
         }
         
         if (!shippedTime || isNaN(shippedTime.getTime())) {
-          console.log(`⚠️ Order ${index}: Invalid shipped time`);
           return;
         }
         
@@ -866,9 +1023,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
         }));
         
         // Debug first few orders
-        if (index < 5) {
-          console.log(`📦 Order ${index}: ${order.order_number} shipped at ${shippedTime.toISOString()} = ${easternHour}:00 Eastern`);
-        }
         
         // Only count orders between 7 AM and 3 PM (Eastern time)
         if (easternHour >= 7 && easternHour <= 15) {
@@ -879,16 +1033,12 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
           }
         } else {
           filteredOutCount++;
-          if (index < 5) {
-            console.log(`⏰ Order ${index}: Filtered out (hour ${easternHour} outside 7-15 range)`);
-          }
         }
       } catch (error) {
         console.error('Error processing order:', error);
       }
     });
     
-    console.log(`✅ Processed ${processedCount} orders, filtered out ${filteredOutCount} orders (outside 7AM-3PM)`);
 
     return hourlyData;
   }, [shippedToday]);
@@ -1180,17 +1330,25 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     const daysAgo = trendTimeframe === 'daily' ? 7 : trendTimeframe === 'weekly' ? 21 : 30;
     const startDate = new Date(now.getTime() - (daysAgo * 24 * 60 * 60 * 1000));
     
-    // Pre-filter shipped orders only
+    // Pre-filter shipped orders only - OPTIMIZED
     const shippedOrders = orders.filter(order => 
       order.status === 'shipped' && 
       order.shippedAt
     );
 
+    // Early exit if no orders
+    if (shippedOrders.length === 0) {
+      return { data: [], average: 0 };
+    }
+
+    // Limit processing to last 2000 orders for performance
+    const ordersToProcess = shippedOrders.slice(0, 2000);
+
     // Group orders by time period
     const grouped = {};
     let totalOrders = 0;
     
-    shippedOrders.forEach(order => {
+    ordersToProcess.forEach(order => {
       try {
         const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
         if (shippedDate >= startDate) {
@@ -1229,7 +1387,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     };
   }, [orders, trendTimeframe]);
 
-  // Get hourly allocation data for orders coming in (24 hours)
+  // Get hourly allocation data for orders coming in (24 hours) - OPTIMIZED
   const getHourlyAllocationData = useMemo(() => {
     // Initialize data array with all 24 hours
     const hourlyData = Array.from({ length: 24 }, (_, index) => ({
@@ -1238,11 +1396,19 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       hourNumber: index
     }));
 
+    // Early exit if no orders
+    if (orders.length === 0) {
+      return hourlyData;
+    }
+
     // Count orders allocated today by hour (PROPERLY FIXED FOR EASTERN TIME)
     const today = new Date();
     const todayEastern = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
 
-    orders.forEach(order => {
+    // Limit processing to last 1000 orders for performance
+    const ordersToProcess = orders.slice(0, 1000);
+
+    ordersToProcess.forEach(order => {
       try {
         if (!order.allocated_at) return;
         
@@ -1467,6 +1633,27 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                   />
                 </svg>
                 <span>Compliance Board</span>
+              </div>
+            </Link>
+            <Link 
+              to="/countdown" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <span>Countdown</span>
               </div>
             </Link>
           </nav>

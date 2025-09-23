@@ -1279,130 +1279,190 @@ exports.getFillRate = functions.https.onRequest((req, res) => {
     }
 
     try {
-    console.log('📦 getFillRate function started - calling ShipHero with timeout...');
-    
-    // Query for problem orders using "problem" tag
-    const queryBody = {
-      query: `
-        query {
-          orders (tag:"problem"){
-            data (first: 10){
-              pageInfo{
-                hasNextPage
-              }
-              edges {
-                cursor
-                node {
-                  order_number
-                  required_ship_date
+      console.log('📦 getFillRate function started - calling ShipHero with pagination...');
+      
+      // Initialize variables for pagination
+      let allProblemOrders = [];
+      let hasNextPage = true;
+      let cursor = null;
+      const pageSize = 10; // Keep at 10 for rate limiting purposes
+      let pageCount = 0;
+      
+      // Paginate through all problem orders
+      while (hasNextPage) {
+        pageCount++;
+        console.log(`📄 Fetching page ${pageCount} of problem orders...`);
+        
+        const queryBody = {
+          query: `
+            query GetProblemOrders($first: Int!, $after: String) {
+              orders(tag: "problem") {
+                data(first: $first, after: $after) {
+                  edges {
+                    node {
+                      order_number
+                      required_ship_date
+                    }
+                    cursor
+                  }
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
                 }
               }
             }
+          `,
+          variables: {
+            first: pageSize,
+            after: cursor
           }
+        };
+
+        console.log(`📡 Making ShipHero API call for page ${pageCount}...`);
+        
+        // Add timeout to ShipHero API call
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => {
+          console.log(`⏰ ShipHero API call timed out after 8 seconds on page ${pageCount}`);
+          controller.abort();
+        }, 8000); // 8 second timeout
+        
+        const response = await fetch('https://public-api.shiphero.com/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+          },
+          body: JSON.stringify(queryBody),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        console.log(`📥 ShipHero API responded with status: ${response.status} for page ${pageCount}`);
+
+        if (!response.ok) {
+          console.error(`❌ ShipHero API Error on page ${pageCount}:`, response.status, response.statusText);
+          res.status(500).json({
+            success: false,
+            error: `ShipHero API error: ${response.status}`
+          });
+          return;
         }
-      `
-    };
 
-    console.log('📡 Making ShipHero API call...');
-    
-    // Add timeout to ShipHero API call
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      console.log('⏰ ShipHero API call timed out after 8 seconds');
-      controller.abort();
-    }, 8000); // 8 second timeout
-    
-    const response = await fetch('https://public-api.shiphero.com/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${functions.config().shiphero.api_token}`
-      },
-      body: JSON.stringify(queryBody),
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    console.log('📥 ShipHero API responded with status:', response.status);
+        const data = await response.json();
+        console.log(`📥 ShipHero fill rate response received for page ${pageCount}`);
 
-    if (!response.ok) {
-      console.error('❌ ShipHero API Error:', response.status, response.statusText);
-      res.status(500).json({
-        success: false,
-        error: `ShipHero API error: ${response.status}`
-      });
-      return;
-    }
+        if (data.errors) {
+          console.error(`❌ GraphQL Errors on page ${pageCount}:`, data.errors);
+          res.status(500).json({
+            success: false,
+            error: 'GraphQL errors',
+            details: data.errors
+          });
+          return;
+        }
 
-    const data = await response.json();
-    console.log('📥 ShipHero fill rate response received');
-
-    if (data.errors) {
-      console.error('❌ GraphQL Errors:', data.errors);
-      res.status(500).json({
-        success: false,
-        error: 'GraphQL errors',
-        details: data.errors
-      });
-      return;
-    }
-
-    // Filter problem orders to only include today or overdue (ignore future dates)
-    const todayEastern = new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-    const todayDate = new Date(todayEastern);
-    
-    const problemOrders = data?.data?.orders?.data?.edges || [];
-    const problemOrdersDueNow = problemOrders.filter(edge => {
-      const order = edge.node;
-      if (!order.required_ship_date) return false;
-      
-      const requiredDate = new Date(order.required_ship_date);
-      const requiredDateStr = requiredDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-      const requiredDateObj = new Date(requiredDateStr);
-      
-      // Only include if required ship date is today or before (ignore future)
-      return requiredDateObj <= todayDate;
-    });
-
-    console.log(`🚨 Found ${problemOrdersDueNow.length} problem orders due today/overdue out of ${problemOrders.length} total problem orders`);
-
-    res.status(200).json({
-      success: true,
-      data: {
-        problemOrdersCount: problemOrdersDueNow.length,
-        totalProblemOrders: problemOrders.length,
-        problemOrders: problemOrdersDueNow.map(edge => ({
-          order_number: edge.node.order_number,
-          required_ship_date: edge.node.required_ship_date
-        }))
+        // Add orders from this page
+        const pageOrders = data?.data?.orders?.data?.edges || [];
+        allProblemOrders = allProblemOrders.concat(pageOrders);
+        
+        console.log(`📄 Page ${pageCount}: Got ${pageOrders.length} orders, total so far: ${allProblemOrders.length}`);
+        
+        // Check if there are more pages
+        hasNextPage = data?.data?.orders?.data?.pageInfo?.hasNextPage || false;
+        cursor = data?.data?.orders?.data?.pageInfo?.endCursor || null;
+        
+        // Add a delay between pages to avoid overwhelming the API
+        if (hasNextPage) {
+          console.log(`⏳ Waiting 1 second before fetching next page...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
-    });
+      
+      console.log(`✅ Pagination complete: Fetched ${allProblemOrders.length} total problem orders across ${pageCount} pages`);
 
-  } catch (error) {
-    console.error('❌ Error fetching fill rate:', error);
-    
-    // If ShipHero API times out, return fallback data (no problem orders)
-    if (error.name === 'AbortError') {
-      console.log('🔄 ShipHero API timed out, returning fallback data (0 problem orders)');
+      // Get today's date in Eastern timezone
+      const todayEastern = new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+      const todayDate = new Date(todayEastern);
+      const todayStr = todayDate.toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      console.log(`📅 Today's date (Eastern): ${todayEastern} (${todayStr})`);
+      
+      // Get fill rate issues from our tracking collection
+      const fillRateIssuesSnapshot = await db.collection('fill_rate_issues').get();
+      const trackedIssueNumbers = new Set();
+      
+      fillRateIssuesSnapshot.forEach(doc => {
+        const issueData = doc.data();
+        // Only count issues that were first detected today or are still active
+        if (issueData.first_detected_date === todayStr) {
+          trackedIssueNumbers.add(issueData.order_number);
+        }
+      });
+      
+      console.log(`📊 Found ${trackedIssueNumbers.size} active fill rate issues for today from tracking collection`);
+      
+      // Filter problem orders to only include NEW issues (not in our tracking collection)
+      const newProblemOrders = allProblemOrders.filter(edge => {
+        const order = edge.node;
+        if (!order.required_ship_date) return false;
+        
+        const requiredDate = new Date(order.required_ship_date);
+        const requiredDateStr = requiredDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+        const requiredDateObj = new Date(requiredDateStr);
+        
+        // Only include if required ship date is today or before (ignore future)
+        if (requiredDateObj > todayDate) return false;
+        
+        // Only include if this order number is NOT in our tracking collection
+        return !trackedIssueNumbers.has(order.order_number);
+      });
+
+      console.log(`🚨 Found ${newProblemOrders.length} NEW problem orders due today/overdue out of ${allProblemOrders.length} total problem orders`);
+      console.log(`📊 Total active fill rate issues for today: ${trackedIssueNumbers.size + newProblemOrders.length}`);
+
       res.status(200).json({
         success: true,
         data: {
-          problemOrdersCount: 0,
-          totalProblemOrders: 0,
-          problemOrders: [],
-          fallback: true,
-          reason: 'ShipHero API timeout'
+          problemOrdersCount: newProblemOrders.length,
+          totalProblemOrders: allProblemOrders.length,
+          trackedIssuesCount: trackedIssueNumbers.size,
+          totalActiveIssues: trackedIssueNumbers.size + newProblemOrders.length,
+          pagesFetched: pageCount,
+          problemOrders: newProblemOrders.map(edge => ({
+            order_number: edge.node.order_number,
+            required_ship_date: edge.node.required_ship_date
+          }))
         }
       });
-      return;
+
+    } catch (error) {
+      console.error('❌ Error fetching fill rate:', error);
+      
+      // If ShipHero API times out, return fallback data (no problem orders)
+      if (error.name === 'AbortError') {
+        console.log('🔄 ShipHero API timed out, returning fallback data (0 problem orders)');
+        res.status(200).json({
+          success: true,
+          data: {
+            problemOrdersCount: 0,
+            totalProblemOrders: 0,
+            pagesFetched: 0,
+            problemOrders: [],
+            fallback: true,
+            reason: 'ShipHero API timeout'
+          }
+        });
+        return;
+      }
+      
+      res.status(500).json({
+        success: false,
+        error: 'Failed to fetch fill rate',
+        details: error.message
+      });
     }
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
   });
 });
 
@@ -1452,3 +1512,1303 @@ exports.packErrorsWebhook = functions.https.onRequest((req, res) => {
     }
   });
 });
+
+// Gmail Response Time Analyzer - calculates response time metrics for business hours
+exports.analyzeGmailResponseTimes = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+
+    try {
+      const { userEmail, date } = req.body;
+      
+      if (!userEmail) {
+        res.status(400).json({
+          success: false,
+          error: 'userEmail is required'
+        });
+        return;
+      }
+
+      // Use provided date or default to today
+      let targetDate;
+      if (date) {
+        // Parse the date string properly (YYYY-MM-DD format)
+        const [year, month, day] = date.split('-').map(Number);
+        // Create date at midnight Eastern time
+        // Use a specific time that will be interpreted as Eastern time
+        const easternDateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}T00:00:00-04:00`;
+        targetDate = new Date(easternDateStr);
+      } else {
+        targetDate = new Date();
+      }
+      
+      // Convert to Eastern timezone string for display
+      const targetDateStr = targetDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+      
+      console.log(`📧 Analyzing Gmail response times for ${userEmail} on ${targetDateStr}`);
+      console.log(`📧 Target Date Object: ${targetDate.toISOString()}`);
+
+      // Initialize Gmail API client
+      const { google } = require('googleapis');
+      
+      // Read private key directly from JSON file to avoid Firebase config escaping issues
+      const fs = require('fs');
+      const path = require('path');
+      const keyFile = JSON.parse(fs.readFileSync(path.join(__dirname, 'superheroboardv2-22da6951042a.json'), 'utf8'));
+      
+      const auth = new google.auth.JWT({
+        email: keyFile.client_email,
+        key: keyFile.private_key,
+        scopes: [
+          'https://www.googleapis.com/auth/gmail.readonly'
+        ],
+        subject: userEmail
+      });
+
+      const gmail = google.gmail({ version: 'v1', auth });
+
+      // Get emails from the target date (business hours: 8 AM - 3 PM Eastern)
+      // Create dates in Eastern timezone by properly handling timezone conversion
+      const startTime = new Date(targetDate);
+      startTime.setHours(8, 0, 0, 0); // Set to 8 AM in local time
+      
+      const endTime = new Date(targetDate);
+      endTime.setHours(15, 0, 0, 0); // Set to 3 PM in local time
+
+      // Convert to RFC 3339 format for Gmail API
+      const startTimeRFC = startTime.toISOString();
+      const endTimeRFC = endTime.toISOString();
+
+      console.log(`⏰ Business hours: ${startTime.toLocaleString('en-US', {timeZone: 'America/New_York'})} to ${endTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+
+      // First, let's test a simple search without date restrictions
+      console.log(`🔍 Testing simple search first...`);
+      const simpleResponse = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: 10 // Just get a few emails to test
+      });
+      
+      console.log(`🔍 Simple Search Response:`, JSON.stringify(simpleResponse.data, null, 2));
+      
+      // Now try the date-restricted search with Gmail-compatible format
+      // Gmail prefers YYYY/MM/DD format over RFC 3339 timestamps
+      // Use the full day: after:2025/08/14 before:2025/08/15
+      const startDate = startTime.toISOString().split('T')[0].replace(/-/g, '/');
+      const endDate = new Date(startTime);
+      endDate.setDate(endDate.getDate() + 1); // Next day
+      const endDateStr = endDate.toISOString().split('T')[0].replace(/-/g, '/');
+      
+      // Filter for emails sent FROM the user (responses only)
+      const query = `after:${startDate} before:${endDateStr} from:${userEmail}`;
+      
+      console.log(`🔍 Gmail Search Query: "${query}"`);
+      console.log(`🔍 Start Date: ${startDate}`);
+      console.log(`🔍 End Date: ${endDate}`);
+      
+      const messagesResponse = await gmail.users.messages.list({
+        userId: 'me',
+        q: query,
+        maxResults: 100 // Adjust as needed
+      });
+
+      const messages = messagesResponse.data.messages || [];
+      console.log(`📥 Found ${messages.length} total responses from ${userEmail} for the day`);
+      
+      // Log the full Gmail API response for debugging
+      console.log(`🔍 Gmail API Response:`, JSON.stringify(messagesResponse.data, null, 2));
+
+      if (messages.length === 0) {
+        res.status(200).json({
+          success: true,
+          data: {
+            userEmail,
+            date: targetDateStr,
+            totalResponses: 0,
+            respondedWithin4Hours: 0,
+            responseRate: 100,
+            averageResponseTime: 0,
+            details: []
+          }
+        });
+        return;
+      }
+
+      // Filter responses to only include those sent during business hours (8 AM - 3 PM EST)
+      const businessHoursResponses = [];
+      console.log(`🔍 Filtering ${messages.length} responses for business hours (8 AM - 3 PM EST)...`);
+      
+      for (const message of messages) {
+        try {
+          // Get message details to check the sent time
+          const messageDetails = await gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'metadata',
+            metadataHeaders: ['Date', 'Subject', 'In-Reply-To', 'References']
+          });
+          
+          const headers = messageDetails.data.payload.headers;
+          const dateHeader = headers.find(h => h.name === 'Date');
+          
+          if (dateHeader) {
+            const sentTime = new Date(dateHeader.value);
+            const sentTimeEST = new Date(sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'}));
+            
+            // Check if sent during business hours (8 AM - 3 PM EST)
+            const hour = sentTimeEST.getHours();
+            if (hour >= 8 && hour < 15) { // 8 AM to 2:59 PM (before 3 PM)
+              businessHoursResponses.push({
+                message,
+                sentTime,
+                headers
+              });
+            }
+          }
+        } catch (error) {
+          console.log(`⚠️ Could not process message ${message.id}:`, error.message);
+        }
+      }
+      
+      console.log(`📥 Found ${businessHoursResponses.length} responses during business hours (8 AM - 3 PM EST)`);
+      
+      if (businessHoursResponses.length === 0) {
+        res.status(200).json({
+          success: true,
+          data: {
+            userEmail,
+            date: targetDateStr,
+            totalResponses: 0,
+            respondedWithin4Hours: 0,
+            responseRate: 100,
+            averageResponseTime: 0,
+            details: []
+          }
+        });
+        return;
+      }
+
+      // Analyze response times for each response (only business hours responses)
+      const responseAnalysis = [];
+      let respondedWithin4HoursCount = 0;
+      let totalResponseTime = 0; // Track total response time for average calculation
+
+      for (const { message, sentTime, headers } of businessHoursResponses) {
+        try {
+          // Get the subject to find the thread
+          const subjectHeader = headers.find(h => h.name === 'Subject');
+          const subject = subjectHeader ? subjectHeader.value : '';
+          
+          console.log(`📧 Analyzing response with subject: "${subject}" sent at ${sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          
+          // Get the thread ID for this message
+          const messageDetails = await gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'metadata',
+            metadataHeaders: ['Date', 'Subject', 'Thread-ID']
+          });
+          
+          const threadId = messageDetails.data.threadId;
+          console.log(`🔍 Thread ID: ${threadId}`);
+          
+          // Get all messages in this thread
+          const threadResponse = await gmail.users.threads.get({
+            userId: 'me',
+            id: threadId
+          });
+          
+          const threadMessages = threadResponse.data.messages || [];
+          console.log(`📧 Found ${threadMessages.length} messages in thread`);
+          
+          let latestMessageTime = null;
+          
+          // Find the latest message in the thread that was sent before Kristen's response
+          for (const threadMessage of threadMessages) {
+            try {
+              // Skip Kristen's own messages
+              const fromHeader = threadMessage.payload.headers.find(h => h.name === 'From');
+              if (fromHeader && fromHeader.value.toLowerCase().includes(userEmail.toLowerCase())) {
+                continue;
+              }
+              
+              const dateHeader = threadMessage.payload.headers.find(h => h.name === 'Date');
+              if (dateHeader) {
+                const threadMessageTime = new Date(dateHeader.value);
+                
+                // Only count messages from today (same day as Kristen's response)
+                const threadMessageDate = threadMessageTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+                const sentTimeDate = sentTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+                
+                if (threadMessageDate === sentTimeDate && threadMessageTime < sentTime && (!latestMessageTime || threadMessageTime > latestMessageTime)) {
+                  latestMessageTime = threadMessageTime;
+                  console.log(`✅ Found previous message at ${threadMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+                }
+              }
+            } catch (error) {
+              console.log(`⚠️ Could not process thread message:`, error.message);
+            }
+          }
+          
+          // If no previous message found, this is either a thread Kristen started or she's responding to herself
+          if (!latestMessageTime) {
+            console.log(`⚠️ No previous message found - likely thread started by ${userEmail} or self-response`);
+            continue; // Skip this response
+          }
+          
+          // Push early messages to 8 AM (if message was sent before 8 AM, count it as 8 AM)
+          const eightAM = new Date(sentTime);
+          eightAM.setHours(8, 0, 0, 0);
+          
+          const effectiveMessageTime = latestMessageTime < eightAM ? eightAM : latestMessageTime;
+          
+          const responseTimeHours = (sentTime - effectiveMessageTime) / (1000 * 60 * 60);
+          const respondedWithin4Hours = responseTimeHours <= 4;
+          
+          console.log(`✅ Response time: ${responseTimeHours.toFixed(2)} hours (${respondedWithin4Hours ? 'within' : 'over'} 4 hours)`);
+          console.log(`    📧 Previous message: ${latestMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    📧 Effective message time: ${effectiveMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    📧 Kristen's response: ${sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    ⏰ Time difference: ${responseTimeHours.toFixed(2)} hours`);
+          
+          responseAnalysis.push({
+            subject: subject,
+            sentTime: sentTime.toISOString(),
+            responseTimeHours: responseTimeHours,
+            respondedWithin4Hours: respondedWithin4Hours,
+            previousMessageTime: latestMessageTime.toISOString(),
+            effectiveMessageTime: effectiveMessageTime.toISOString()
+          });
+          
+          if (respondedWithin4Hours) {
+            respondedWithin4HoursCount++;
+          }
+          totalResponseTime += responseTimeHours;
+
+        } catch (messageError) {
+          console.log(`⚠️ Error analyzing response ${message.id}:`, messageError.message);
+        }
+      }
+
+      // Calculate metrics
+      const totalResponses = responseAnalysis.length;
+      const responseRate = totalResponses > 0 ? Math.round((respondedWithin4HoursCount / totalResponses) * 100 * 10) / 10 : 100;
+      
+      const averageResponseTime = totalResponses > 0 
+        ? Math.round((totalResponseTime / totalResponses) * 10) / 10
+        : 0;
+
+      console.log(`📊 Analysis complete: ${respondedWithin4HoursCount}/${totalResponses} responses sent within 4 hours (${responseRate}%)`);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          userEmail,
+          date: targetDateStr,
+          totalResponses,
+          respondedWithin4Hours: respondedWithin4HoursCount,
+          responseRate,
+          averageResponseTime,
+          details: responseAnalysis
+        }
+      });
+
+    } catch (error) {
+      console.error('❌ Error analyzing Gmail response times:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to analyze Gmail response times',
+        details: error.message
+      });
+    }
+  });
+});
+
+// Scheduled function to collect daily Gmail response time data
+exports.collectDailyGmailResponseTime = functions.pubsub.schedule('0 0 * * *').timeZone('America/New_York').onRun(async (context) => {
+  try {
+    console.log('📧 Starting daily Gmail response time collection for Kristen...');
+    
+    // Get yesterday's date in YYYY-MM-DD format
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = yesterday.toISOString().split('T')[0];
+    
+    // Create date in Eastern timezone for consistent handling
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const easternDateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}T00:00:00-04:00`;
+    const targetDate = new Date(easternDateStr);
+    
+    console.log(`📅 Analyzing Gmail response times for ${dateStr}`);
+    
+    // Call the Gmail analyzer function for yesterday
+    const { userEmail, date } = {
+      userEmail: 'kristen@ecoship.com',
+      date: dateStr
+    };
+    
+    // Initialize Gmail API client
+    const { google } = require('googleapis');
+    const fs = require('fs');
+    const path = require('path');
+    const keyFile = JSON.parse(fs.readFileSync(path.join(__dirname, 'superheroboardv2-22da6951042a.json'), 'utf8'));
+    
+    const auth = new google.auth.JWT({
+      email: keyFile.client_email,
+      key: keyFile.private_key,
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      subject: userEmail
+    });
+
+    const gmail = google.gmail({ version: 'v1', auth });
+
+    // Create dates for the full day in YYYY/MM/DD format for Gmail API
+    const startDate = dateStr.replace(/-/g, '/');
+    const endDate = new Date(yesterday);
+    endDate.setDate(endDate.getDate() + 1);
+    const endDateStr = endDate.toISOString().split('T')[0].replace(/-/g, '/');
+    
+    // Filter for emails sent FROM the user (responses only)
+    const query = `after:${startDate} before:${endDateStr} from:${userEmail}`;
+    
+    console.log(`🔍 Gmail Search Query: "${query}"`);
+    
+    const messagesResponse = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 100
+    });
+
+    const messages = messagesResponse.data.messages || [];
+    console.log(`📥 Found ${messages.length} total responses from ${userEmail} for ${dateStr}`);
+    
+    if (messages.length === 0) {
+      // Store zero results
+      await db.collection('gmailResponseTimes').doc(dateStr).set({
+        date: dateStr,
+        userEmail: userEmail,
+        totalResponses: 0,
+        respondedWithin4Hours: 0,
+        responseRate: 100,
+        averageResponseTime: 0,
+        collectedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      console.log(`✅ Stored zero results for ${dateStr}`);
+      return null;
+    }
+
+    // Filter responses to only include those sent during business hours (8 AM - 3 PM EST)
+    const businessHoursResponses = [];
+    
+    for (const message of messages) {
+      try {
+        const messageDetails = await gmail.users.messages.get({
+          userId: 'me',
+          id: message.id,
+          format: 'metadata',
+          metadataHeaders: ['Date', 'Subject']
+        });
+        
+        const headers = messageDetails.data.payload.headers;
+        const dateHeader = headers.find(h => h.name === 'Date');
+        
+        if (dateHeader) {
+          const sentTime = new Date(dateHeader.value);
+          const sentTimeEST = new Date(sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'}));
+          const hour = sentTimeEST.getHours();
+          if (hour >= 8 && hour < 15) {
+            businessHoursResponses.push({
+              message,
+              sentTime,
+              headers
+            });
+          }
+        }
+      } catch (error) {
+        console.log(`⚠️ Could not process message ${message.id}:`, error.message);
+      }
+    }
+    
+    console.log(`📥 Found ${businessHoursResponses.length} responses during business hours (8 AM - 3 PM EST)`);
+    
+    if (businessHoursResponses.length === 0) {
+      await db.collection('gmailResponseTimes').doc(dateStr).set({
+        date: dateStr,
+        userEmail: userEmail,
+        totalResponses: 0,
+        respondedWithin4Hours: 0,
+        responseRate: 100,
+        averageResponseTime: 0,
+        collectedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      console.log(`✅ Stored zero business hours results for ${dateStr}`);
+      return null;
+    }
+
+    // Analyze response times for each response
+    const responseAnalysis = [];
+    let respondedWithin4HoursCount = 0;
+
+    for (const { message, sentTime, headers } of businessHoursResponses) {
+              try {
+          // Get the subject to find the thread
+          const subjectHeader = headers.find(h => h.name === 'Subject');
+          const subject = subjectHeader ? subjectHeader.value : '';
+          
+          console.log(`📧 Analyzing response with subject: "${subject}" sent at ${sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          
+          // Get the thread ID for this message
+          const messageDetails = await gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'metadata',
+            metadataHeaders: ['Date', 'Subject', 'Thread-ID']
+          });
+          
+          const threadId = messageDetails.data.threadId;
+          console.log(`🔍 Thread ID: ${threadId}`);
+          
+          // Get all messages in this thread
+          const threadResponse = await gmail.users.threads.get({
+            userId: 'me',
+            id: threadId
+          });
+          
+          const threadMessages = threadResponse.data.messages || [];
+          console.log(`📧 Found ${threadMessages.length} messages in thread`);
+          
+          let latestMessageTime = null;
+          
+          // Find the latest message in the thread that was sent before Kristen's response
+          for (const threadMessage of threadMessages) {
+            try {
+              // Skip Kristen's own messages
+              const fromHeader = threadMessage.payload.headers.find(h => h.name === 'From');
+              if (fromHeader && fromHeader.value.toLowerCase().includes(userEmail.toLowerCase())) {
+                continue;
+              }
+              
+              const dateHeader = threadMessage.payload.headers.find(h => h.name === 'Date');
+              if (dateHeader) {
+                const threadMessageTime = new Date(dateHeader.value);
+                
+                // Only count messages from today (same day as Kristen's response)
+                const threadMessageDate = threadMessageTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+                const sentTimeDate = sentTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+                
+                if (threadMessageDate === sentTimeDate && threadMessageTime < sentTime && (!latestMessageTime || threadMessageTime > latestMessageTime)) {
+                  latestMessageTime = threadMessageTime;
+                  console.log(`✅ Found previous message at ${threadMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+                }
+              }
+            } catch (error) {
+              console.log(`⚠️ Could not process thread message:`, error.message);
+            }
+          }
+          
+          // If no previous message found, this is either a thread Kristen started or she's responding to herself
+          if (!latestMessageTime) {
+            console.log(`⚠️ No previous message found - likely thread started by ${userEmail} or self-response`);
+            continue; // Skip this response
+          }
+          
+          // Push early messages to 8 AM (if message was sent before 8 AM, count it as 8 AM)
+          const eightAM = new Date(sentTime);
+          eightAM.setHours(8, 0, 0, 0);
+          
+          const effectiveMessageTime = latestMessageTime < eightAM ? eightAM : latestMessageTime;
+          
+          const responseTimeHours = (sentTime - effectiveMessageTime) / (1000 * 60 * 60);
+          const respondedWithin4Hours = responseTimeHours <= 4;
+          
+          console.log(`✅ Response time: ${responseTimeHours.toFixed(2)} hours (${respondedWithin4Hours ? 'within' : 'over'} 4 hours)`);
+          console.log(`    📧 Previous message: ${latestMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    📧 Effective message time: ${effectiveMessageTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    📧 Kristen's response: ${sentTime.toLocaleString('en-US', {timeZone: 'America/New_York'})}`);
+          console.log(`    ⏰ Time difference: ${responseTimeHours.toFixed(2)} hours`);
+          
+          responseAnalysis.push({
+            subject: subject,
+            sentTime: sentTime.toISOString(),
+            responseTimeHours: responseTimeHours,
+            respondedWithin4Hours: respondedWithin4Hours,
+            previousMessageTime: latestMessageTime.toISOString(),
+            effectiveMessageTime: effectiveMessageTime.toISOString()
+          });
+          
+          if (respondedWithin4Hours) {
+            respondedWithin4HoursCount++;
+          }
+
+        } catch (messageError) {
+          console.log(`⚠️ Error analyzing response ${message.id}:`, messageError.message);
+        }
+    }
+
+    // Calculate metrics
+    const totalResponses = responseAnalysis.length;
+    const responseRate = totalResponses > 0 ? Math.round((respondedWithin4HoursCount / totalResponses) * 100 * 10) / 10 : 100;
+    
+    const responseTimes = responseAnalysis
+      .filter(r => r.responseTimeHours > 0)
+      .map(r => r.responseTimeHours);
+    
+    const averageResponseTime = responseTimes.length > 0 
+      ? Math.round((responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) * 10) / 10
+      : 0;
+
+    console.log(`📊 Analysis complete: ${respondedWithin4HoursCount}/${totalResponses} responses sent within 4 hours (${responseRate}%)`);
+
+    // Store results in Firestore
+    await db.collection('gmailResponseTimes').doc(dateStr).set({
+      date: dateStr,
+      userEmail: userEmail,
+      totalResponses,
+      respondedWithin4Hours: respondedWithin4HoursCount,
+      responseRate,
+      averageResponseTime,
+      details: responseAnalysis,
+      collectedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`✅ Successfully stored Gmail response time data for ${dateStr}`);
+    return null;
+
+  } catch (error) {
+    console.error('❌ Error in daily Gmail response time collection:', error);
+    throw error;
+  }
+});
+
+exports.processBackorders = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+
+    try {
+      console.log('🚚 processBackorders function started - processing daily backorders...');
+      
+      // Clear temporary backorder collection first
+      console.log('🧹 Clearing temporary backorder collection...');
+      const tempCollectionRef = admin.firestore().collection('tempBackorders');
+      const tempSnapshot = await tempCollectionRef.get();
+      const deletePromises = tempSnapshot.docs.map(doc => doc.ref.delete());
+      await Promise.all(deletePromises);
+      console.log(`✅ Cleared ${tempSnapshot.docs.length} temporary backorder records`);
+      
+      // Get tomorrow's date (skip weekends)
+      const tomorrow = getNextBusinessDay(new Date());
+      const tomorrowStr = tomorrow.toISOString().split('T')[0]; // YYYY-MM-DD format
+      console.log(`📅 Processing backorders for ship date: ${tomorrowStr}`);
+      
+      let allBackorders = [];
+      let hasNextPage = true;
+      let cursor = null;
+      let pageCount = 0;
+      
+      // Paginate through all backorders
+      while (hasNextPage) {
+        pageCount++;
+        console.log(`📄 Processing page ${pageCount}...`);
+        
+        // Build query with cursor if available
+        const queryBody = {
+          query: `
+            query($cursor: String) {
+              orders(has_backorder: true) {
+                data(first: 20, after: $cursor) {
+                  edges {
+                    cursor
+                    node {
+                      order_number
+                      id
+                    }
+                  }
+                  pageInfo {
+                    hasNextPage
+                  }
+                }
+              }
+            }
+          `,
+          variables: { cursor: cursor }
+        };
+        
+        console.log(`📡 Making ShipHero API call for page ${pageCount}...`);
+        
+        const response = await fetch('https://public-api.shiphero.com/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+          },
+          body: JSON.stringify(queryBody)
+        });
+        
+        if (!response.ok) {
+          console.error(`❌ ShipHero API Error on page ${pageCount}:`, response.status, response.statusText);
+          continue; // Skip this page and continue with next
+        }
+        
+        const data = await response.json();
+        
+        if (data.errors) {
+          console.error(`❌ GraphQL Errors on page ${pageCount}:`, data.errors);
+          continue; // Skip this page and continue with next
+        }
+        
+        const orders = data?.data?.orders?.data?.edges || [];
+        const pageInfo = data?.data?.orders?.data?.pageInfo || {};
+        
+        console.log(`📦 Page ${pageCount}: Found ${orders.length} backorders`);
+        
+        // Store backorders in temporary Firebase collection
+        const storePromises = orders.map(async (edge) => {
+          const order = edge.node;
+          await tempCollectionRef.doc(order.id).set({
+            order_number: order.order_number,
+            id: order.id,
+            cursor: edge.cursor,
+            processed: false,
+            timestamp: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
+        
+        await Promise.all(storePromises);
+        console.log(`💾 Stored ${orders.length} backorders in temporary collection`);
+        
+        // Update pagination variables
+        hasNextPage = pageInfo.hasNextPage || false;
+        cursor = orders.length > 0 ? orders[orders.length - 1].cursor : null;
+        
+        // Add delay between queries to avoid rate limiting
+        if (hasNextPage) {
+          console.log('⏳ Waiting 2 seconds before next page...');
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+      
+      console.log(`✅ Completed pagination. Total pages: ${pageCount}`);
+      
+      // Get all stored backorders for processing
+      const allBackordersSnapshot = await tempCollectionRef.get();
+      const backordersToProcess = allBackordersSnapshot.docs.map(doc => doc.data());
+      
+      console.log(`🚀 Processing ${backordersToProcess.length} backorders with ship date updates...`);
+      
+      let successCount = 0;
+      let errorCount = 0;
+      
+      // Process each backorder with delay
+      for (let i = 0; i < backordersToProcess.length; i++) {
+        const backorder = backordersToProcess[i];
+        
+        try {
+          console.log(`📝 Updating order ${backorder.order_number} (${i + 1}/${backordersToProcess.length})...`);
+          
+          const mutationBody = {
+            query: `
+              mutation {
+                order_update(data: {
+                  order_id: "${backorder.id}"
+                  required_ship_date: "${tomorrowStr}"
+                }) {
+                  request_id
+                }
+              }
+            `
+          };
+          
+          const updateResponse = await fetch('https://public-api.shiphero.com/graphql', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            },
+            body: JSON.stringify(mutationBody)
+          });
+          
+          if (!updateResponse.ok) {
+            throw new Error(`HTTP ${updateResponse.status}: ${updateResponse.statusText}`);
+          }
+          
+          const updateData = await updateResponse.json();
+          
+          if (updateData.errors) {
+            throw new Error(`GraphQL: ${updateData.errors[0].message}`);
+          }
+          
+          // Mark as processed in Firebase
+          await tempCollectionRef.doc(backorder.id).update({
+            processed: true,
+            request_id: updateData.data?.order_update?.request_id || 'unknown',
+            processed_at: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          successCount++;
+          console.log(`✅ Successfully updated order ${backorder.order_number}`);
+          
+        } catch (error) {
+          errorCount++;
+          console.error(`❌ Failed to update order ${backorder.order_number}:`, error.message);
+          
+          // Mark as failed in Firebase
+          await tempCollectionRef.doc(backorder.id).update({
+            processed: false,
+            error: error.message,
+            failed_at: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+        
+        // Add delay between mutations to avoid rate limiting
+        if (i < backordersToProcess.length - 1) {
+          console.log('⏳ Waiting 1 second before next order...');
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      console.log(`🎯 Processing complete! Success: ${successCount}, Errors: ${errorCount}`);
+      
+      res.status(200).json({
+        success: true,
+        summary: {
+          totalBackorders: backordersToProcess.length,
+          successCount,
+          errorCount,
+          shipDate: tomorrowStr,
+          processedAt: new Date().toISOString()
+        }
+      });
+      
+    } catch (error) {
+      console.error('❌ Error in processBackorders:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  });
+});
+
+// Helper function to get next business day (skip weekends)
+function getNextBusinessDay(date) {
+  const tomorrow = new Date(date);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  
+  // Skip weekends
+  while (tomorrow.getDay() === 0 || tomorrow.getDay() === 6) {
+    tomorrow.setDate(tomorrow.getDate() + 1);
+  }
+  
+  return tomorrow;
+}
+
+// Scheduled function that runs daily at 8 AM EST
+exports.scheduledBackorderProcessing = functions
+  .runWith({
+    timeoutSeconds: 540,  // 9 minutes timeout (maximum allowed)
+    memory: '256MB'
+  })
+  .pubsub.schedule('0 8 * * 1-5') // 8 AM UTC = 4 AM EDT, 3 AM EST
+  .timeZone('America/New_York')
+  .onRun(async (context) => {
+    console.log('🚀 ===== SCHEDULED FUNCTION TRIGGERED =====');
+    console.log('⏰ Scheduled backorder processing triggered at:', new Date().toISOString());
+    console.log('📍 Function context:', JSON.stringify(context, null, 2));
+    console.log('🔧 Function name: scheduledBackorderProcessing');
+    console.log('🌍 Current timezone:', Intl.DateTimeFormat().resolvedOptions().timeZone);
+    
+    try {
+      console.log('✅ Function execution started successfully');
+      
+      // Call the processBackorders function logic directly
+      console.log('🚚 Starting scheduled backorder processing...');
+      
+      // Test Firebase admin access
+      console.log('🔥 Testing Firebase admin access...');
+      try {
+        const testRef = admin.firestore().collection('test');
+        console.log('✅ Firebase admin access successful');
+      } catch (firebaseError) {
+        console.error('❌ Firebase admin access failed:', firebaseError);
+        throw firebaseError;
+      }
+      
+      // Clear temporary backorder collection first
+      console.log('🧹 Clearing temporary backorder collection...');
+      const tempCollectionRef = admin.firestore().collection('tempBackorders');
+      console.log('📁 Collection reference created:', tempCollectionRef.path);
+      
+      const tempSnapshot = await tempCollectionRef.get();
+      console.log(`📊 Found ${tempSnapshot.docs.length} existing temporary records`);
+      
+      if (tempSnapshot.docs.length > 0) {
+        console.log('🗑️ Deleting existing temporary records...');
+        const deletePromises = tempSnapshot.docs.map(doc => doc.ref.delete());
+        await Promise.all(deletePromises);
+        console.log(`✅ Successfully cleared ${tempSnapshot.docs.length} temporary backorder records`);
+      } else {
+        console.log('✨ No existing temporary records to clear');
+      }
+      
+      // Get tomorrow's date (skip weekends)
+      console.log('📅 Calculating tomorrow\'s date...');
+      const today = new Date();
+      console.log('📅 Today\'s date:', today.toISOString());
+      console.log('📅 Today\'s day of week:', today.getDay());
+      
+      const tomorrow = getNextBusinessDay(today);
+      const tomorrowStr = tomorrow.toISOString().split('T')[0]; // YYYY-MM-DD format
+      console.log(`📅 Tomorrow's calculated date: ${tomorrowStr}`);
+      console.log(`📅 Tomorrow's day of week: ${tomorrow.getDay()}`);
+      
+      // Test ShipHero API token access
+      console.log('🔑 Testing ShipHero API token access...');
+      try {
+        const token = functions.config().shiphero.api_token;
+        if (token) {
+          console.log('✅ ShipHero API token found (length:', token.length, ')');
+          console.log('🔑 Token preview:', token.substring(0, 10) + '...');
+        } else {
+          console.log('❌ ShipHero API token is undefined or empty');
+          throw new Error('ShipHero API token not configured');
+        }
+      } catch (tokenError) {
+        console.error('❌ Error accessing ShipHero API token:', tokenError);
+        throw tokenError;
+      }
+      
+      console.log('🚀 Starting pagination through backorders...');
+      
+      let hasNextPage = true;
+      let cursor = null;
+      let pageCount = 0;
+      let totalBackordersFound = 0;
+      
+      // Paginate through all backorders
+      while (hasNextPage) {
+        pageCount++;
+        console.log(`📄 ===== PROCESSING PAGE ${pageCount} =====`);
+        
+        // Build query with cursor if available
+        const queryBody = {
+          query: `
+            query($cursor: String) {
+              orders(has_backorder: true) {
+                data(first: 20, after: $cursor) {
+                  edges {
+                    cursor
+                    node {
+                      order_number
+                      id
+                    }
+                  }
+                  pageInfo {
+                    hasNextPage
+                  }
+                }
+              }
+            }
+          `,
+          variables: { cursor: cursor }
+        };
+        
+        console.log(`📡 Making ShipHero API call for page ${pageCount}...`);
+        console.log(`🔍 Query body:`, JSON.stringify(queryBody, null, 2));
+        console.log(`📍 Cursor for this page:`, cursor || 'null (first page)');
+        
+        try {
+          const response = await fetch('https://public-api.shiphero.com/graphql', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            },
+            body: JSON.stringify(queryBody)
+          });
+          
+          console.log(`📥 ShipHero API response status: ${response.status} ${response.statusText}`);
+          
+          if (!response.ok) {
+            console.error(`❌ ShipHero API Error on page ${pageCount}:`, response.status, response.statusText);
+            console.log('🔄 Continuing to next page...');
+            continue; // Skip this page and continue with next
+          }
+          
+          const data = await response.json();
+          console.log(`📥 ShipHero API response received for page ${pageCount}`);
+          
+          if (data.errors) {
+            console.error(`❌ GraphQL Errors on page ${pageCount}:`, data.errors);
+            console.log('🔄 Continuing to next page...');
+            continue; // Skip this page and continue with next
+          }
+          
+          const orders = data?.data?.orders?.data?.edges || [];
+          const pageInfo = data?.data?.orders?.data?.pageInfo || {};
+          
+          console.log(`📦 Page ${pageCount}: Found ${orders.length} backorders`);
+          console.log(`📊 PageInfo:`, JSON.stringify(pageInfo, null, 2));
+          
+          if (orders.length > 0) {
+            console.log(`📋 Sample orders from page ${pageCount}:`, orders.slice(0, 3).map(edge => ({
+              order_number: edge.node.order_number,
+              id: edge.node.id,
+              cursor: edge.cursor
+            })));
+          }
+          
+          // Store backorders in temporary Firebase collection
+          console.log(`💾 Storing ${orders.length} backorders in temporary collection...`);
+          const storePromises = orders.map(async (edge) => {
+            const order = edge.node;
+            try {
+              await tempCollectionRef.doc(order.id).set({
+                order_number: order.order_number,
+                id: order.id,
+                cursor: edge.cursor,
+                processed: false,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+              });
+              return true;
+            } catch (storeError) {
+              console.error(`❌ Failed to store order ${order.order_number}:`, storeError);
+              return false;
+            }
+          });
+          
+          const storeResults = await Promise.all(storePromises);
+          const successfulStores = storeResults.filter(result => result === true).length;
+          console.log(`💾 Successfully stored ${successfulStores}/${orders.length} backorders in temporary collection`);
+          
+          totalBackordersFound += orders.length;
+          
+          // Update pagination variables
+          hasNextPage = pageInfo.hasNextPage || false;
+          cursor = orders.length > 0 ? orders[orders.length - 1].cursor : null;
+          
+          console.log(`🔄 Pagination update - hasNextPage: ${hasNextPage}, next cursor: ${cursor || 'null'}`);
+          
+          // Add delay between queries to avoid rate limiting
+          if (hasNextPage) {
+            console.log('⏳ Waiting 2 seconds before next page...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+          
+        } catch (pageError) {
+          console.error(`❌ Error processing page ${pageCount}:`, pageError);
+          console.log('🔄 Continuing to next page...');
+          continue;
+        }
+      }
+      
+      console.log(`✅ ===== PAGINATION COMPLETE =====`);
+      console.log(`📊 Total pages processed: ${pageCount}`);
+      console.log(`📦 Total backorders found: ${totalBackordersFound}`);
+      
+      // Get all stored backorders for processing
+      console.log('📥 Retrieving all stored backorders for processing...');
+      const allBackordersSnapshot = await tempCollectionRef.get();
+      const backordersToProcess = allBackordersSnapshot.docs.map(doc => doc.data());
+      
+      console.log(`🚀 Processing ${backordersToProcess.length} backorders with ship date updates...`);
+      console.log(`📅 Target ship date: ${tomorrowStr}`);
+      
+      if (backordersToProcess.length === 0) {
+        console.log('✨ No backorders to process - function complete!');
+        return {
+          success: true,
+          summary: {
+            totalBackorders: 0,
+            successCount: 0,
+            errorCount: 0,
+            shipDate: tomorrowStr,
+            processedAt: new Date().toISOString(),
+            message: 'No backorders found to process'
+          }
+        };
+      }
+      
+      let successCount = 0;
+      let errorCount = 0;
+      
+      // Process each backorder with delay
+      for (let i = 0; i < backordersToProcess.length; i++) {
+        const backorder = backordersToProcess[i];
+        
+        console.log(`📝 ===== PROCESSING ORDER ${i + 1}/${backordersToProcess.length} =====`);
+        console.log(`📋 Order details:`, JSON.stringify(backorder, null, 2));
+        
+        try {
+          console.log(`📝 Updating order ${backorder.order_number} (${i + 1}/${backordersToProcess.length})...`);
+          
+          const mutationBody = {
+            query: `
+              mutation {
+                order_update(data: {
+                  order_id: "${backorder.id}"
+                  required_ship_date: "${tomorrowStr}"
+                }) {
+                  request_id
+                }
+              }
+            `
+          };
+          
+          console.log(`🔧 Mutation body:`, JSON.stringify(mutationBody, null, 2));
+          
+          const updateResponse = await fetch('https://public-api.shiphero.com/graphql', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            },
+            body: JSON.stringify(mutationBody)
+          });
+          
+          console.log(`📥 Update response status: ${updateResponse.status} ${updateResponse.statusText}`);
+          
+          if (!updateResponse.ok) {
+            throw new Error(`HTTP ${updateResponse.status}: ${updateResponse.statusText}`);
+          }
+          
+          const updateData = await updateResponse.json();
+          console.log(`📥 Update response data:`, JSON.stringify(updateData, null, 2));
+          
+          if (updateData.errors) {
+            throw new Error(`GraphQL: ${updateData.errors[0].message}`);
+          }
+          
+          // Mark as processed in Firebase
+          console.log(`💾 Marking order ${backorder.order_number} as processed...`);
+          await tempCollectionRef.doc(backorder.id).update({
+            processed: true,
+            request_id: updateData.data?.order_update?.request_id || 'unknown',
+            processed_at: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          successCount++;
+          console.log(`✅ Successfully updated order ${backorder.order_number}`);
+          
+        } catch (error) {
+          errorCount++;
+          console.error(`❌ Failed to update order ${backorder.order_number}:`, error.message);
+          console.error(`❌ Full error:`, error);
+          
+          // Mark as failed in Firebase
+          try {
+            await tempCollectionRef.doc(backorder.id).update({
+              processed: false,
+              error: error.message,
+              failed_at: admin.firestore.FieldValue.serverTimestamp()
+            });
+            console.log(`💾 Marked order ${backorder.order_number} as failed in Firebase`);
+          } catch (firebaseError) {
+            console.error(`❌ Failed to update Firebase status for order ${backorder.order_number}:`, firebaseError);
+          }
+        }
+        
+        // Add delay between mutations to avoid rate limiting
+        if (i < backordersToProcess.length - 1) {
+          console.log('⏳ Waiting 1 second before next order...');
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      console.log(`🎯 ===== PROCESSING COMPLETE =====`);
+      console.log(`📊 Summary: Success: ${successCount}, Errors: ${errorCount}`);
+      console.log(`📅 Ship date used: ${tomorrowStr}`);
+      console.log(`⏰ Completed at: ${new Date().toISOString()}`);
+      
+      return {
+        success: true,
+        summary: {
+          totalBackorders: backordersToProcess.length,
+          successCount,
+          errorCount,
+          shipDate: tomorrowStr,
+          processedAt: new Date().toISOString()
+        }
+      };
+      
+    } catch (error) {
+      console.error('❌ ===== FATAL ERROR IN SCHEDULED FUNCTION =====');
+      console.error('❌ Error details:', error);
+      console.error('❌ Error stack:', error.stack);
+      console.error('❌ Error message:', error.message);
+      console.error('❌ Function failed at:', new Date().toISOString());
+      throw error; // Re-throw to mark the scheduled function as failed
+    }
+  });
+
+// Scheduled function that runs daily at midnight EST to process fill rate issues
+exports.processFillRateIssues = functions
+  .runWith({
+    timeoutSeconds: 540,  // 9 minutes timeout (maximum allowed)
+    memory: '256MB'
+  })
+  .pubsub.schedule('0 5 * * *') // 5 AM UTC = midnight EST
+  .timeZone('America/New_York')
+  .onRun(async (context) => {
+    console.log('🚀 ===== FILL RATE ISSUES PROCESSING TRIGGERED =====');
+    console.log('⏰ Processing fill rate issues at:', new Date().toISOString());
+    
+    try {
+      // Get yesterday's date (since we're processing at midnight for the previous day)
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0]; // YYYY-MM-DD format
+      
+      console.log(`📅 Processing fill rate issues for: ${yesterdayStr}`);
+      
+      // Query ShipHero for ALL problem orders with pagination
+      let allProblemOrders = [];
+      let hasNextPage = true;
+      let cursor = null;
+      const pageSize = 10; // Keep at 10 for rate limiting
+      let pageCount = 0;
+      
+      console.log('📡 Starting pagination through all problem orders...');
+      
+      while (hasNextPage) {
+        pageCount++;
+        console.log(`📄 Fetching page ${pageCount} of problem orders...`);
+        
+        const queryBody = {
+          query: `
+            query GetProblemOrders($first: Int!, $after: String) {
+              orders(tag: "problem") {
+                data(first: $first, after: $after) {
+                  edges {
+                    node {
+                      order_number
+                      required_ship_date
+                    }
+                    cursor
+                  }
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                }
+              }
+            }
+          `,
+          variables: {
+            first: pageSize,
+            after: cursor
+          }
+        };
+        
+        const response = await fetch('https://public-api.shiphero.com/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+          },
+          body: JSON.stringify(queryBody)
+        });
+        
+        if (!response.ok) {
+          console.error(`❌ ShipHero API Error on page ${pageCount}:`, response.status, response.statusText);
+          throw new Error(`ShipHero API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.errors) {
+          console.error(`❌ GraphQL Errors on page ${pageCount}:`, data.errors);
+          throw new Error('GraphQL errors');
+        }
+        
+        // Add orders from this page
+        const pageOrders = data?.data?.orders?.data?.edges || [];
+        allProblemOrders = allProblemOrders.concat(pageOrders);
+        
+        console.log(`📄 Page ${pageCount}: Got ${pageOrders.length} orders, total so far: ${allProblemOrders.length}`);
+        
+        // Check if there are more pages
+        hasNextPage = data?.data?.orders?.data?.pageInfo?.hasNextPage || false;
+        cursor = data?.data?.orders?.data?.pageInfo?.endCursor || null;
+        
+        // Add delay between pages to avoid overwhelming the API
+        if (hasNextPage) {
+          console.log(`⏳ Waiting 1 second before fetching next page...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      console.log(`✅ Pagination complete: Fetched ${allProblemOrders.length} total problem orders across ${pageCount} pages`);
+      
+      // Get existing fill rate issues from Firestore
+      const existingIssuesSnapshot = await db.collection('fill_rate_issues').get();
+      const existingIssueNumbers = new Set();
+      
+      existingIssuesSnapshot.forEach(doc => {
+        existingIssueNumbers.add(doc.data().order_number);
+      });
+      
+      console.log(`📊 Found ${existingIssueNumbers.size} existing fill rate issues in Firestore`);
+      
+      // Process each problem order
+      let newIssuesCount = 0;
+      let updatedIssuesCount = 0;
+      
+      for (const edge of allProblemOrders) {
+        const order = edge.node;
+        
+        if (!order.required_ship_date) continue;
+        
+        const requiredDate = new Date(order.required_ship_date);
+        const requiredDateStr = requiredDate.toISOString().split('T')[0];
+        
+        // Only process orders that were due yesterday or before
+        if (requiredDateStr > yesterdayStr) continue;
+        
+        const orderNumber = order.order_number;
+        
+        if (!existingIssueNumbers.has(orderNumber)) {
+          // This is a NEW fill rate issue - add it to the collection
+          await db.collection('fill_rate_issues').doc(orderNumber).set({
+            order_number: orderNumber,
+            first_detected_date: requiredDateStr,
+            added_to_collection: yesterdayStr,
+            problem_type: 'inventory_issue',
+            required_ship_date: order.required_ship_date,
+            processed_at: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          newIssuesCount++;
+          console.log(`🆕 Added new fill rate issue: ${orderNumber}`);
+        } else {
+          // This issue already exists - just update the timestamp
+          await db.collection('fill_rate_issues').doc(orderNumber).update({
+            updated_at: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          updatedIssuesCount++;
+        }
+      }
+      
+      console.log(`✅ Fill rate issues processing complete:`);
+      console.log(`   - New issues added: ${newIssuesCount}`);
+      console.log(`   - Existing issues updated: ${updatedIssuesCount}`);
+      console.log(`   - Total issues in collection: ${existingIssueNumbers.size + newIssuesCount}`);
+      
+      return {
+        success: true,
+        newIssuesCount,
+        updatedIssuesCount,
+        totalIssues: existingIssueNumbers.size + newIssuesCount,
+        processedDate: yesterdayStr
+      };
+      
+    } catch (error) {
+      console.error('❌ Error processing fill rate issues:', error);
+      throw error;
+    }
+  });

@@ -1,4 +1,4 @@
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { useState, useEffect, useMemo } from 'react';
 import { db } from './firebase';
 import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
@@ -9,8 +9,10 @@ import ViewToggle from './ViewToggle';
 import LevelUpLog from './LevelUpLog';
 import ComplianceBoard from './ComplianceBoard';
 import LocationBuilder from './LocationBuilder';
+import Countdown from './Countdown';
 
 const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
+  const location = useLocation();
   const [orders, setOrders] = useState([]);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
   const [timeUntilRefresh, setTimeUntilRefresh] = useState(300); // 5 minutes in seconds
@@ -254,8 +256,8 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     <>
       <ViewToggle />
       
-      {/* Global Auto-Refresh Status */}
-      {autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && (
+      {/* Global Auto-Refresh Status - Hidden on countdown page */}
+      {autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
         <div className="fixed bottom-4 left-4 bg-white rounded-lg shadow-xl border border-gray-200 p-4 z-40 min-w-[280px]">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-semibold text-gray-800">Auto-Refresh Status</h3>
@@ -307,8 +309,8 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
         </div>
       )}
       
-      {/* Re-enable auto-refresh button when disabled */}
-      {!autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && (
+      {/* Re-enable auto-refresh button when disabled - Hidden on countdown page */}
+      {!autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
         <div className="fixed bottom-4 left-4 bg-gray-100 rounded-lg shadow-lg border border-gray-300 p-3 z-40">
           <button
             onClick={() => {
@@ -329,6 +331,7 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
         <Route path="/level-up-log" element={<LevelUpLog isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/location-builder" element={<LocationBuilder isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/compliance-board" element={<ComplianceBoard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
+        <Route path="/countdown" element={<Countdown isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         {/* Only show EFM Product Sizes to admin users */}
         {isAuthenticated && userRole === 'admin' && (
           <Route path="/efm-product-sizes" element={<EFMProductSizes isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
