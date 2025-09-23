@@ -12,11 +12,13 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   const [formData, setFormData] = useState({
     warehouse: '',
     customWarehouse: '',
-    aisle: { start: '', end: '' },
+    aisle: { start: '', end: '', filter: 'even' },
     bay: { start: '', end: '', filter: 'all' },
     level: { start: '', end: '' },
     position: { start: '', end: '' },
-    locationType: ''
+    locationType: '',
+    pickable: true,
+    sellable: true
   });
 
   const warehouseOptions = [
@@ -85,11 +87,13 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     setFormData({
       warehouse: '',
       customWarehouse: '',
-      aisle: { start: '', end: '' },
+      aisle: { start: '', end: '', filter: 'even' },
       bay: { start: '', end: '', filter: 'all' },
       level: { start: '', end: '' },
       position: { start: '', end: '' },
-      locationType: ''
+      locationType: '',
+      pickable: true,
+      sellable: true
     });
   };
 
@@ -128,11 +132,43 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     }));
   };
 
+  const handleAisleFilterChange = (filter) => {
+    setFormData(prev => ({
+      ...prev,
+      aisle: {
+        ...prev.aisle,
+        filter: filter
+      }
+    }));
+  };
+
   const handleLocationTypeChange = (value) => {
     setFormData(prev => ({
       ...prev,
       locationType: value
     }));
+  };
+
+  const handlePickableSellableChange = (field, value) => {
+    setFormData(prev => {
+      const newData = { ...prev };
+      
+      if (field === 'sellable') {
+        newData.sellable = value;
+        // If sellable is unchecked, pickable must also be unchecked
+        if (!value) {
+          newData.pickable = false;
+        }
+      } else if (field === 'pickable') {
+        // Can only check pickable if sellable is checked
+        if (value && !prev.sellable) {
+          return prev; // Don't update if trying to check pickable without sellable
+        }
+        newData.pickable = value;
+      }
+      
+      return newData;
+    });
   };
 
   const getCurrentLayout = () => {
@@ -224,8 +260,8 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
       const range = formData[fieldName];
       const values = [];
       
-      if (fieldName === 'bay' && range.filter !== 'all') {
-        // Handle bay filtering for odd/even
+      if ((fieldName === 'bay' || fieldName === 'aisle') && range.filter !== 'all') {
+        // Handle bay/aisle filtering for odd/even
         const start = parseInt(range.start);
         const end = parseInt(range.end);
         
@@ -295,8 +331,8 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
         },
         body: JSON.stringify({
           name: locationName,
-          pickable: true,
-          sellable: true,
+          pickable: formData.pickable,
+          sellable: formData.sellable,
           location_type_id: locationTypeId,
           zone: "A",
           warehouse_id: "V2FyZWhvdXNlOjExNDkwNA=="
@@ -804,6 +840,55 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                           </span>
                         </div>
                       )}
+
+                      {/* Special filter options for Aisle */}
+                      {level.toLowerCase() === 'aisle' && (
+                        <div className="mt-4 pt-3">
+                          <label className="block text-sm font-medium text-gray-700 mb-2">
+                            Filter Options
+                          </label>
+                          <div className="flex space-x-4">
+                            <label className="flex items-center">
+                              <input
+                                type="radio"
+                                name="aisleFilter"
+                                value="all"
+                                checked={formData.aisle.filter === 'all'}
+                                onChange={(e) => handleAisleFilterChange(e.target.value)}
+                                className="mr-2 text-blue-600"
+                              />
+                              <span className="text-sm text-gray-700">All</span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="radio"
+                                name="aisleFilter"
+                                value="odd"
+                                checked={formData.aisle.filter === 'odd'}
+                                onChange={(e) => handleAisleFilterChange(e.target.value)}
+                                className="mr-2 text-blue-600"
+                              />
+                              <span className="text-sm text-gray-700">Odd</span>
+                            </label>
+                            <label className="flex items-center">
+                              <input
+                                type="radio"
+                                name="aisleFilter"
+                                value="even"
+                                checked={formData.aisle.filter === 'even'}
+                                onChange={(e) => handleAisleFilterChange(e.target.value)}
+                                className="mr-2 text-blue-600"
+                              />
+                              <span className="text-sm text-gray-700">Even</span>
+                            </label>
+                          </div>
+                          <span className="text-xs text-gray-500 mt-1 block">
+                            {formData.aisle.filter === 'odd' ? 'Only odd-numbered aisles will be created' :
+                             formData.aisle.filter === 'even' ? 'Only even-numbered aisles will be created' :
+                             'All aisles in the range will be created'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ))}
 
@@ -829,6 +914,50 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                     <span className="text-xs text-gray-500 mt-1 block">
                       Choose the storage type for these locations
                     </span>
+                  </div>
+
+                  {/* Pickable/Sellable Section */}
+                  <div className="py-6 px-6 bg-purple-50 rounded-lg">
+                    <label className="block text-sm font-medium text-gray-700 mb-3">
+                      Location Properties
+                    </label>
+                    <div className="space-y-3">
+                      <label className="flex items-center">
+                        <input
+                          type="checkbox"
+                          checked={formData.sellable}
+                          onChange={(e) => handlePickableSellableChange('sellable', e.target.checked)}
+                          className="mr-3 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                        />
+                        <span className="text-sm font-medium text-gray-700">Sellable</span>
+                        <span className="text-xs text-gray-500 ml-2">Inventory will show up in the clients store</span>
+                      </label>
+                      
+                      <label className="flex items-center">
+                        <input
+                          type="checkbox"
+                          checked={formData.pickable}
+                          onChange={(e) => handlePickableSellableChange('pickable', e.target.checked)}
+                          disabled={!formData.sellable}
+                          className={`mr-3 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded ${
+                            !formData.sellable ? 'opacity-50 cursor-not-allowed' : ''
+                          }`}
+                        />
+                        <span className={`text-sm font-medium ${!formData.sellable ? 'text-gray-400' : 'text-gray-700'}`}>
+                          Pickable
+                        </span>
+                        <span className={`text-xs ml-2 ${!formData.sellable ? 'text-gray-400' : 'text-gray-500'}`}>
+                         Normal orders can be picked from this location (requires Sellable)
+                        </span>
+                      </label>
+                    </div>
+                    {!formData.sellable && (
+                      <div className="mt-3 p-2 bg-amber-50 border border-amber-200 rounded">
+                        <span className="text-xs text-amber-800">
+                          💡 Note: Pickable locations must also be sellable
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 
@@ -973,6 +1102,14 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                         <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded">
                           <span className="text-sm text-amber-800">
                             ⚠️ Bay filter applied: {formData.bay.filter === 'odd' ? 'Odd numbers only' : 'Even numbers only'}
+                          </span>
+                        </div>
+                      )}
+                      
+                      {formData.aisle?.filter && formData.aisle.filter !== 'all' && (
+                        <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded">
+                          <span className="text-sm text-amber-800">
+                            ⚠️ Aisle filter applied: {formData.aisle.filter === 'odd' ? 'Odd numbers only' : 'Even numbers only'}
                           </span>
                         </div>
                       )}
