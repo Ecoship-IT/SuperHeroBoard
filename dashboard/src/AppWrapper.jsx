@@ -1,36 +1,20 @@
 import { Routes, Route, useLocation } from 'react-router-dom';
-import { useState, useEffect, useMemo } from 'react';
-import { db } from './firebase';
-import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { Dashboard } from './App';
 import EFMProductSizes from './EFMProductSizes';
-import SuperheroAlt from './SuperheroAlt';
+// import SuperheroAlt from './SuperheroAlt'; // DISABLED: Not being used, has expensive real-time listeners
 import ViewToggle from './ViewToggle';
 import LevelUpLog from './LevelUpLog';
-import ComplianceBoard from './ComplianceBoard';
+// import ComplianceBoard from './ComplianceBoard'; // DISABLED: Not being used, has expensive real-time listeners
 import LocationBuilder from './LocationBuilder';
 import Countdown from './Countdown';
 
 const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   const location = useLocation();
-  const [orders, setOrders] = useState([]);
-  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
-  const [timeUntilRefresh, setTimeUntilRefresh] = useState(300); // 5 minutes in seconds
-  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
-  const [lastAutoRefresh, setLastAutoRefresh] = useState(null);
+  // Removed expensive polling - Dashboard component now uses real-time listeners (onSnapshot)
+  // This saves ~$890/month in Firestore costs!
 
-  // Listen to orders collection globally
-  useEffect(() => {
-    const q = query(collection(db, 'orders'), orderBy('allocated_at', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setOrders(data);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Same needsShippedToday logic as other components
-  const needsShippedToday = (order) => {
+  // Removed needsShippedToday logic - no longer needed since we don't poll orders here
+  /* const needsShippedToday = (order) => {
     // Check for ShipHero override first
     if (order && typeof order === 'object' && order.ship_today_override !== undefined) {
       return order.ship_today_override;
@@ -108,22 +92,10 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     const todayStr = today.toISOString().split('T')[0];
     
     return shipDateStr === todayStr;
-  };
-
-  // Calculate not-tote-complete orders count
-  const notToteCompleteCount = useMemo(() => {
-    const ordersToShipToday = orders.filter(
-      order => 
-        needsShippedToday(order) &&
-        !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
-        order.ready_to_ship === true
-    );
-
-    return ordersToShipToday.filter(order => order.tote_completed !== true).length;
-  }, [orders]);
+  }; */
 
   // Auto-refresh fulfillment status data
-  const performAutoRefresh = async () => {
+  /* const performAutoRefresh = async () => {
     if (notToteCompleteCount === 0 || notToteCompleteCount > 60) {
       console.log(`⏭️ Skipping auto-refresh: ${notToteCompleteCount} orders (need ≤60 and >0)`);
       return;
@@ -219,10 +191,10 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     } finally {
       setIsAutoRefreshing(false);
     }
-  };
+  }; */
 
   // Countdown timer effect
-  useEffect(() => {
+  /* useEffect(() => {
     if (!autoRefreshEnabled || isAutoRefreshing) return;
 
     const interval = setInterval(() => {
@@ -237,27 +209,28 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [autoRefreshEnabled, isAutoRefreshing, notToteCompleteCount, orders]);
+  }, [autoRefreshEnabled, isAutoRefreshing, notToteCompleteCount, orders]); */
 
   // Manual refresh trigger
-  const triggerManualRefresh = () => {
+  /* const triggerManualRefresh = () => {
     setTimeUntilRefresh(300); // Reset timer
     performAutoRefresh();
-  };
+  }; */
 
   // Format time for display
-  const formatTime = (seconds) => {
+  /* const formatTime = (seconds) => {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-  };
+  }; */
 
   return (
     <>
+      {/* ViewToggle - always show since Dashboard handles data loading */}
       <ViewToggle />
       
       {/* Global Auto-Refresh Status - Hidden on countdown page */}
-      {autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
+      {/* {autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
         <div className="fixed bottom-4 left-4 bg-white rounded-lg shadow-xl border border-gray-200 p-4 z-40 min-w-[280px]">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-semibold text-gray-800">Auto-Refresh Status</h3>
@@ -307,10 +280,10 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
             </button>
           </div>
         </div>
-      )}
+      )} */}
       
       {/* Re-enable auto-refresh button when disabled - Hidden on countdown page */}
-      {!autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
+      {/* {!autoRefreshEnabled && notToteCompleteCount <= 60 && notToteCompleteCount > 0 && location.pathname !== '/countdown' && (
         <div className="fixed bottom-4 left-4 bg-gray-100 rounded-lg shadow-lg border border-gray-300 p-3 z-40">
           <button
             onClick={() => {
@@ -322,15 +295,17 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
             Enable Auto-Refresh
           </button>
         </div>
-      )}
+      )} */}
 
             <Routes>
         <Route path="/" element={<Dashboard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
-        <Route path="/superhero-alt" element={<SuperheroAlt isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
+        {/* DISABLED: Not being used, has expensive real-time listeners */}
+        {/* <Route path="/superhero-alt" element={<SuperheroAlt isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} /> */}
         {/* Hidden Level Up Log - accessible via direct URL only */}
         <Route path="/level-up-log" element={<LevelUpLog isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         <Route path="/location-builder" element={<LocationBuilder isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
-        <Route path="/compliance-board" element={<ComplianceBoard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
+        {/* DISABLED: Not being used, has expensive real-time listeners */}
+        {/* <Route path="/compliance-board" element={<ComplianceBoard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} /> */}
         <Route path="/countdown" element={<Countdown isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         {/* Only show EFM Product Sizes to admin users */}
         {isAuthenticated && userRole === 'admin' && (

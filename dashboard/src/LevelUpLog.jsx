@@ -28,8 +28,6 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
       // Switch case to redirect to different Google Sheets based on pin
       let redirectUrl;
       
-      // COMMENTED OUT FOR ROLLOUT CONTROL - UNCOMMENT PEOPLE AS NEEDED
-      /*
       switch (inputValue.trim()) {
         case '3681':
           // Tara Bare
@@ -171,22 +169,23 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
           redirectUrl = 'https://www.youtube.com/watch?v=xvFZjo5PgG0';
           break;
 
+        case '6845':
+          // Marlyn Reyes
+          redirectUrl = 'https://docs.google.com/spreadsheets/d/15ju9nt-LmYH7h85ra_bUxGK21rg5Go46WvVU6dke2Cs/edit?gid=337733353#gid=337733353';
+          break;
 
-
+        case '8387':
+          // Ethan Nevin
+          redirectUrl = 'https://docs.google.com/spreadsheets/d/1CpriEQ4eI8sYIC340L7fJ_pLSP3ZHpyx17Ty4NJ2bvs/edit?gid=337733353#gid=337733353';
+          break;
 
         default:
           // Invalid pin - show error message instead of redirecting
           setSubmitMessage('❌ Invalid pin. Please check your pin and try again.');
           setTimeout(() => setSubmitMessage(''), 5000);
+          setIsSubmitting(false);
           return; // Exit early, don't redirect
       }
-      */
-      
-      // TEMPORARILY DISABLED - NO PINS WORK UNTIL ROLLOUT
-      setSubmitMessage('❌ Level Up Log is not yet available. Please wait for rollout.');
-      setTimeout(() => setSubmitMessage(''), 5000);
-      setIsSubmitting(false);
-      return;
       
       // If we get here, we have a valid pin and URL - redirect
       console.log('Redirecting to:', redirectUrl);
@@ -295,8 +294,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                 <span>SuperHero Board</span>
               </div>
             </Link>
-            {/* Temporarily hidden Level Up Log */}
-            {/* <Link 
+            <Link 
               to="/level-up-log" 
               className="block px-6 py-3 text-gray-700 bg-blue-50 border-blue-200 rounded-lg transition-all duration-200 text-lg font-semibold border shadow-sm"
             >
@@ -316,7 +314,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                 </svg>
                 <span>Level Up Log</span>
               </div>
-            </Link> */}
+            </Link>
             {isAuthenticated && userRole === 'admin' && (
               <Link 
                 to="/efm-product-sizes" 

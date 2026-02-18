@@ -20,6 +20,7 @@ const ViewToggle = () => {
   }, []);
 
   // Don't render on mobile (768px and below) or if not on main/alt routes
+  // Also don't render during initial load (when orders haven't been fetched yet)
   if (!mounted || (!isMainView && !isAltView) || windowWidth <= 768) {
     return null;
   }
@@ -40,37 +41,7 @@ const ViewToggle = () => {
         alignItems: 'center'
       }}
     >
-      {isMainView ? (
-        <>
-          <button
-            className="px-5 py-2.5 text-sm font-semibold rounded-full transition-all duration-200 text-white shadow-sm"
-            style={{ backgroundColor: '#16a34a' }}
-          >
-            Count
-          </button>
-          <Link
-            to="/superhero-alt"
-            className="px-5 py-2.5 text-sm font-semibold rounded-full transition-all duration-200 text-gray-600 hover:text-gray-800 hover:bg-gray-100"
-          >
-            Status
-          </Link>
-        </>
-      ) : (
-        <>
-          <Link
-            to="/"
-            className="px-5 py-2.5 text-sm font-semibold rounded-full transition-all duration-200 text-gray-600 hover:text-gray-800 hover:bg-gray-100"
-          >
-            Count
-          </Link>
-          <button
-            className="px-5 py-2.5 text-sm font-semibold rounded-full transition-all duration-200 text-white shadow-sm"
-            style={{ backgroundColor: '#16a34a' }}
-          >
-            Status
-          </button>
-        </>
-      )}
+      {/* Toggle removed - only one view now */}
     </div>
   );
 

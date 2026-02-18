@@ -6,6 +6,153 @@ const cors = require('cors')({ origin: true });
 admin.initializeApp();
 const db = admin.firestore();
 
+// Validation helper for queue items
+function validateQueueItem(queueData, queueId) {
+  // Check if queueData exists and is an object
+  if (!queueData || typeof queueData !== 'object') {
+    return { valid: false, error: 'Queue item data is missing or invalid' };
+  }
+
+  // Check if webhook_data exists and is an object
+  if (!queueData.webhook_data || typeof queueData.webhook_data !== 'object') {
+    return { valid: false, error: 'webhook_data is missing or invalid' };
+  }
+
+  // Check if webhook_data has required structure
+  const webhookData = queueData.webhook_data;
+  if (!webhookData.order_id && !webhookData.order_number) {
+    return { valid: false, error: 'webhook_data missing order_id and order_number' };
+  }
+
+  // Check if status exists (should always be present, but validate anyway)
+  if (!queueData.status) {
+    return { valid: false, error: 'Queue item missing status field' };
+  }
+
+  return { valid: true };
+}
+
+// Slack notification helper for failed queue items
+async function sendSlackFailureNotification(queueData, queueId, error, attempts) {
+  try {
+    const webhookUrl = functions.config().slack?.webhook_url;
+    if (!webhookUrl) {
+      console.log('⚠️ Slack webhook URL not configured, skipping notification');
+      return;
+    }
+
+    const orderNumber = queueData.order_number || 'Unknown';
+    const orderId = queueData.order_id || 'Unknown';
+    const attemptCount = attempts || queueData.attempts || 0;
+    const createdAt = queueData.createdAt?.toDate?.() || new Date();
+    
+    // Format error message (truncate if too long)
+    const errorMessage = error || 'Unknown error';
+    const truncatedError = errorMessage.length > 200 ? errorMessage.substring(0, 200) + '...' : errorMessage;
+
+    const payload = {
+      text: `🚨 EFM Box Assignment Failed`,
+      blocks: [
+        {
+          type: 'header',
+          text: {
+            type: 'plain_text',
+            text: '🚨 EFM Box Assignment Failed'
+          }
+        },
+        {
+          type: 'section',
+          fields: [
+            {
+              type: 'mrkdwn',
+              text: `*Order Number:*\n${orderNumber}`
+            },
+            {
+              type: 'mrkdwn',
+              text: `*Order ID:*\n${orderId}`
+            },
+            {
+              type: 'mrkdwn',
+              text: `*Attempts:*\n${attemptCount}/3`
+            },
+            {
+              type: 'mrkdwn',
+              text: `*Failed At:*\n${new Date().toLocaleString()}`
+            }
+          ]
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Error:*\n\`\`\`${truncatedError}\`\`\``
+          }
+        },
+        {
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: `Queue ID: ${queueId} | Created: ${createdAt.toLocaleString()}`
+            }
+          ]
+        }
+      ]
+    };
+
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      console.error(`❌ Failed to send Slack notification: ${response.status} ${response.statusText}`);
+    } else {
+      console.log(`✅ Slack notification sent for failed order ${orderNumber}`);
+    }
+  } catch (error) {
+    console.error('❌ Error sending Slack notification:', error);
+    // Don't throw - notification failure shouldn't break queue processing
+  }
+}
+
+// EFM Products and Box Sizes Cache
+let efmProductsCache = null;
+let boxSizesCache = null;
+let cacheLastUpdated = null;
+const CACHE_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Load EFM products and box sizes into cache
+async function loadEFMCache() {
+  try {
+    const [productsSnapshot, boxSizesSnapshot] = await Promise.all([
+      db.collection('efm_products').get(),
+      db.collection('box_sizes').get()
+    ]);
+
+    efmProductsCache = productsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    boxSizesCache = boxSizesSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    cacheLastUpdated = Date.now();
+
+    console.log(`✅ EFM cache refreshed: ${efmProductsCache.length} products, ${boxSizesCache.length} box sizes`);
+  } catch (error) {
+    console.error('❌ Error loading EFM cache:', error);
+    // Don't throw - allow function to continue with stale cache or empty cache
+  }
+}
+
+// Initialize cache on module load
+loadEFMCache().catch(err => console.error('❌ Failed to initialize EFM cache:', err));
+
+// Set up periodic cache refresh
+setInterval(() => {
+  console.log('🔄 Refreshing EFM cache...');
+  loadEFMCache().catch(err => console.error('❌ Failed to refresh EFM cache:', err));
+}, CACHE_REFRESH_INTERVAL_MS);
+
 // CORS middleware
 const setCorsHeaders = (res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -13,6 +160,702 @@ const setCorsHeaders = (res) => {
   res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   res.set('Access-Control-Max-Age', '3600');
 };
+
+// EFM Box Assignment Webhook - Separate from SuperHeroBoard
+// Now stores to queue instead of processing immediately
+exports.efmBoxAssignmentWebhook = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    if (req.method !== 'POST') {
+      res.status(405).send('Method Not Allowed');
+      return;
+    }
+
+    const data = req.body;
+    console.log('📥 Received EFM box assignment webhook:', {
+      type: data.webhook_type,
+      orderNumber: data.order_number,
+      accountId: data.account_id,
+      timestamp: new Date().toISOString()
+    });
+
+    try {
+      // Store webhook to queue immediately (lossless processing)
+      const queueRef = await db.collection('efm_webhook_queue').add({
+        webhook_data: data,
+        order_id: data.order_id || null,
+        order_number: data.order_number || null,
+        status: 'pending',
+        priority: Date.now(), // FIFO ordering (lower = earlier)
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        startedAt: null,
+        completedAt: null,
+        attempts: 0,
+        lastError: null,
+        result: null
+      });
+
+      console.log(`✅ Webhook queued for order ${data.order_number} (queue ID: ${queueRef.id})`);
+      res.status(200).send('OK');
+    } catch (error) {
+      console.error(`❌ Error queuing EFM box assignment webhook:`, error);
+      res.status(500).send('Internal Server Error');
+    }
+  });
+});
+
+// EFM Box Assignment Processing
+async function processEFMBoxAssignment(webhookData) {
+  const logCollection = db.collection('efm_box_assignments');
+  const startTime = Date.now();
+
+  // Helper function to log to Firestore
+  const logResult = async (result) => {
+    try {
+      await logCollection.add({
+        ...result,
+        processedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (error) {
+      console.error('❌ Failed to log to Firestore:', error);
+    }
+  };
+
+  // Early validation
+  if (!webhookData.order_id || !webhookData.order_number) {
+    const error = 'Missing required fields: order_id or order_number';
+    console.error(`❌ EFM Box Assignment Error for ${webhookData.order_number}: ${error}`);
+    await logResult({
+      order_number: webhookData.order_number || 'unknown',
+      order_id: webhookData.order_id || null,
+      success: false,
+      error: error,
+      processingTimeMs: Date.now() - startTime
+    });
+    throw new Error(error);
+  }
+
+  // Skip orders with "retain" in order number (case-insensitive)
+  if (webhookData.order_number && webhookData.order_number.toLowerCase().includes('retain')) {
+    console.log(`⏭️ Skipping order ${webhookData.order_number} - contains "retain"`);
+    await logResult({
+      order_number: webhookData.order_number,
+      order_id: webhookData.order_id,
+      success: false,
+      error: 'Order number contains "retain" - skipping processing',
+      processingTimeMs: Date.now() - startTime
+    });
+    return;
+  }
+
+  if (!webhookData.line_items || !Array.isArray(webhookData.line_items) || webhookData.line_items.length === 0) {
+    const error = 'No line items found in order';
+    console.error(`❌ EFM Box Assignment Error for ${webhookData.order_number}: ${error}`);
+    await logResult({
+      order_number: webhookData.order_number,
+      order_id: webhookData.order_id,
+      success: false,
+      error: error,
+      processingTimeMs: Date.now() - startTime
+    });
+    return;
+  }
+
+  console.log(`📦 Processing EFM box assignment for order ${webhookData.order_number}`);
+
+  try {
+    // Ensure cache is loaded (refresh if needed or on first use)
+    if (!efmProductsCache || !boxSizesCache || !cacheLastUpdated) {
+      console.log('🔄 Cache not initialized, loading now...');
+      await loadEFMCache();
+    } else {
+      // Check if cache is stale (older than refresh interval)
+      const cacheAge = Date.now() - cacheLastUpdated;
+      if (cacheAge > CACHE_REFRESH_INTERVAL_MS) {
+        console.log(`🔄 Cache is stale (${Math.round(cacheAge / 1000)}s old), refreshing...`);
+        // Refresh in background, but use current cache for this request
+        loadEFMCache().catch(err => console.error('❌ Background cache refresh failed:', err));
+      }
+    }
+
+    const products = efmProductsCache || [];
+    const boxSizes = boxSizesCache || [];
+
+    // Check if collections are empty
+    if (products.length === 0) {
+      const error = 'EFM products collection is empty';
+      console.error(`❌ EFM Box Assignment Error for ${webhookData.order_number}: ${error}`);
+      await logResult({
+        order_number: webhookData.order_number,
+        order_id: webhookData.order_id,
+        success: false,
+        error: error,
+        processingTimeMs: Date.now() - startTime
+      });
+      throw new Error(error);
+    }
+
+    if (boxSizes.length === 0) {
+      const error = 'Box sizes collection is empty';
+      console.error(`❌ EFM Box Assignment Error for ${webhookData.order_number}: ${error}`);
+      await logResult({
+        order_number: webhookData.order_number,
+        order_id: webhookData.order_id,
+        success: false,
+        error: error,
+        processingTimeMs: Date.now() - startTime
+      });
+      throw new Error(error);
+    }
+
+    // Calculate total size
+    let totalSize = 0;
+    const lineItemDetails = [];
+    const missingSKUs = [];
+    const DEFAULT_SKU_SIZE = 1; // Default size for missing SKUs
+
+    for (const lineItem of webhookData.line_items) {
+      const sku = lineItem.sku;
+      const quantity = lineItem.quantity || 1;
+
+      const product = products.find(p => p.sku === sku);
+
+      let itemSize;
+      let usingDefault = false;
+
+      if (!product) {
+        // Use default value of 1 for missing SKUs
+        itemSize = DEFAULT_SKU_SIZE;
+        usingDefault = true;
+        missingSKUs.push(sku);
+        console.warn(`⚠️ SKU ${sku} not found in EFM products table, using default size of ${DEFAULT_SKU_SIZE}`);
+      } else {
+        itemSize = parseFloat(product.value) || 0;
+      }
+
+      const itemTotalSize = itemSize * quantity;
+      totalSize += itemTotalSize;
+
+      lineItemDetails.push({
+        sku: sku,
+        quantity: quantity,
+        unitSize: itemSize,
+        totalSize: itemTotalSize,
+        usingDefault: usingDefault // Flag to indicate default was used
+      });
+    }
+
+    // Log warning if any SKUs used default values, but don't fail the order
+    if (missingSKUs.length > 0) {
+      console.warn(`⚠️ Order ${webhookData.order_number} contains ${missingSKUs.length} missing SKU(s) using default size: ${missingSKUs.join(', ')}`);
+    }
+
+    // Select box size
+    const sortedBoxes = [...boxSizes].sort((a, b) =>
+      parseFloat(a.maxProductSize) - parseFloat(b.maxProductSize)
+    );
+
+    let selectedBox = sortedBoxes.find(box =>
+      parseFloat(box.maxProductSize) >= totalSize
+    );
+
+    if (!selectedBox) {
+      selectedBox = sortedBoxes[sortedBoxes.length - 1];
+    }
+
+    // Determine box_name for mutation (singles -> Envelope)
+    const boxSizeValue = selectedBox.boxSize || '';
+    const boxName = boxSizeValue.toLowerCase() === 'singles' ? 'Envelope' : boxSizeValue;
+    // fulfillment_status uses original boxSizeValue, not the converted boxName
+    const fulfillmentStatus = `EFM - ${boxSizeValue}`;
+
+    console.log(`📦 Order ${webhookData.order_number}: Total size: ${totalSize}, Selected box: ${boxSizeValue}, Box name: ${boxName}, Fulfillment status: ${fulfillmentStatus}`);
+
+    // Send GraphQL mutation with smart retry
+    // Using GraphQL variables to prevent injection vulnerabilities
+    const mutationBody = {
+      query: `
+        mutation($orderId: String!, $boxName: String!, $fulfillmentStatus: String!) {
+          order_update(data: {
+            order_id: $orderId
+            box_name: $boxName
+            fulfillment_status: $fulfillmentStatus
+          }) {
+            request_id
+          }
+        }
+      `,
+      variables: {
+        orderId: String(webhookData.order_id),
+        boxName: boxName,
+        fulfillmentStatus: fulfillmentStatus
+      }
+    };
+
+    const retryDelays = [15000, 30000, 60000]; // 15s, 30s, 60s
+    let lastError = null;
+    let requestId = null;
+
+    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+      try {
+        // Small delay to prevent hitting ShipHero rate limits during bursts
+        // Only delay on first attempt (not on retries, which already have longer delays)
+        if (attempt === 0) {
+          await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay
+        }
+        
+        const response = await fetch('https://public-api.shiphero.com/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+          },
+          body: JSON.stringify(mutationBody)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        if (data.errors) {
+          const error = data.errors[0];
+          const errorMessage = error?.message || 'Unknown GraphQL error';
+          const errorCode = error?.code; // ShipHero uses numeric codes (e.g., 5 = NOT_FOUND)
+
+          // Don't retry validation/auth errors (check error code, not HTTP status)
+          // GraphQL errors often come with HTTP 200, so we check the error code instead
+          // Common ShipHero error codes: 5 = NOT_FOUND, 3 = VALIDATION_ERROR, etc.
+          const nonRetryableCodes = [3, 5]; // 3 = VALIDATION_ERROR, 5 = NOT_FOUND
+          if (errorCode && nonRetryableCodes.includes(errorCode)) {
+            throw new Error(`GraphQL validation error: ${errorMessage}`);
+          }
+
+          // Retry other errors (server errors, network issues, unknown errors)
+          throw new Error(`GraphQL error: ${errorMessage}`);
+        }
+
+        requestId = data.data?.order_update?.request_id || null;
+        console.log(`✅ Successfully updated order ${webhookData.order_number} with box ${boxName} (request_id: ${requestId})`);
+        break; // Success, exit retry loop
+
+      } catch (error) {
+        lastError = error;
+
+        // Don't retry if it's a validation/auth error (4xx)
+        if (error.message.includes('validation error') || error.message.includes('auth')) {
+          console.error(`❌ Non-retryable error for order ${webhookData.order_number}:`, error.message);
+          break;
+        }
+
+        if (attempt < retryDelays.length) {
+          const delay = retryDelays[attempt];
+          console.log(`⚠️ Attempt ${attempt + 1} failed for order ${webhookData.order_number}, retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error(`❌ All retry attempts failed for order ${webhookData.order_number}:`, error.message);
+        }
+      }
+    }
+
+    // Log result
+    if (requestId) {
+      await logResult({
+        order_number: webhookData.order_number,
+        order_id: webhookData.order_id,
+        success: true,
+        totalSize: totalSize,
+        selectedBox: boxSizeValue,
+        boxName: boxName,
+        fulfillmentStatus: fulfillmentStatus,
+        requestId: requestId,
+        lineItemDetails: lineItemDetails,
+        missingSKUs: missingSKUs.length > 0 ? missingSKUs : undefined, // Track SKUs that used default values
+        processingTimeMs: Date.now() - startTime
+      });
+    } else {
+      const error = lastError?.message || 'Unknown error';
+      await logResult({
+        order_number: webhookData.order_number,
+        order_id: webhookData.order_id,
+        success: false,
+        error: error,
+        totalSize: totalSize,
+        selectedBox: boxSizeValue,
+        boxName: boxName,
+        fulfillmentStatus: fulfillmentStatus,
+        retryAttempts: retryDelays.length + 1,
+        processingTimeMs: Date.now() - startTime
+      });
+      // Throw error so queue processor knows it failed
+      throw new Error(error);
+    }
+
+  } catch (error) {
+    console.error(`❌ Unexpected error processing EFM box assignment for ${webhookData.order_number}:`, error);
+    await logResult({
+      order_number: webhookData.order_number,
+      order_id: webhookData.order_id,
+      success: false,
+      error: error.message || 'Unexpected error',
+      processingTimeMs: Date.now() - startTime
+    });
+    // Re-throw error so queue processor can handle it
+    throw error;
+  }
+}
+
+// EFM Queue Processor - Processes queue items one at a time with delays
+// Triggered by Firestore document creation or scheduled function
+exports.processEFMQueue = functions.https.onRequest(async (req, res) => {
+  cors(req, res, async () => {
+    const PROCESSING_DELAY_MS = 1000; // 1 second delay between items
+    const MAX_ATTEMPTS = 3;
+
+    try {
+      console.log('🔄 Starting EFM queue processing...');
+
+      // Find next pending item (FIFO - oldest first)
+      // Only pick up items that are ready for retry (retryAfter is null or in the past)
+      const now = admin.firestore.Timestamp.now();
+      const pendingSnapshot = await db.collection('efm_webhook_queue')
+        .where('status', '==', 'pending')
+        .orderBy('priority', 'asc')
+        .limit(1)
+        .get();
+      
+      // Filter out items that have retryAfter set in the future
+      const readyItems = pendingSnapshot.docs.filter(doc => {
+        const data = doc.data();
+        const retryAfter = data.retryAfter;
+        return !retryAfter || retryAfter.toMillis() <= now.toMillis();
+      });
+      
+      if (readyItems.length === 0) {
+        console.log('✅ No pending items ready for processing (some may be waiting for retry)');
+        res.status(200).json({ message: 'No pending items ready', processed: 0 });
+        return;
+      }
+      
+      const queueItem = readyItems[0];
+      const queueData = queueItem.data();
+      const queueId = queueItem.id;
+
+      // Validate queue item structure
+      const validation = validateQueueItem(queueData, queueId);
+      if (!validation.valid) {
+        console.error(`❌ Invalid queue item ${queueId}: ${validation.error}`);
+        // Mark as failed immediately - corrupted data shouldn't be retried
+        await queueItem.ref.update({
+          status: 'failed',
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastError: validation.error,
+          result: { success: false, error: validation.error, corrupted: true }
+        });
+        res.status(200).json({
+          message: 'Queue item marked as failed (corrupted)',
+          queueId: queueId,
+          error: validation.error
+        });
+        return;
+      }
+
+      console.log(`📦 Processing queue item ${queueId} for order ${queueData.order_number}`);
+
+      // Mark as processing
+      await queueItem.ref.update({
+        status: 'processing',
+        startedAt: admin.firestore.FieldValue.serverTimestamp(),
+        attempts: (queueData.attempts || 0) + 1,
+        retryAfter: null // Clear retryAfter since we're processing it now
+      });
+
+      // Process the webhook (already validated above)
+      const webhookData = queueData.webhook_data;
+      let processingResult = null;
+      let processingError = null;
+
+      try {
+        // Call the existing processing function
+        await processEFMBoxAssignment(webhookData);
+        processingResult = { success: true };
+      } catch (error) {
+        processingError = error.message || 'Unknown error';
+        console.error(`❌ Error processing queue item ${queueId}:`, error);
+      }
+
+      // Update queue item with result
+      if (processingResult && processingResult.success) {
+        await queueItem.ref.update({
+          status: 'completed',
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          result: processingResult
+        });
+        console.log(`✅ Queue item ${queueId} completed successfully`);
+      } else {
+        // Check if we should retry or mark as failed
+        const attempts = (queueData.attempts || 0) + 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          await queueItem.ref.update({
+            status: 'failed',
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastError: processingError,
+            result: { success: false, error: processingError }
+          });
+          console.log(`❌ Queue item ${queueId} failed after ${attempts} attempts`);
+          
+          // Send failure notification
+          await sendSlackFailureNotification(queueData, queueId, processingError, attempts);
+        } else {
+          // Retry - mark as pending again but set retryAfter to prevent immediate retry in same run
+          const retryAfterTime = new Date(Date.now() + 60000); // 1 minute from now
+          await queueItem.ref.update({
+            status: 'pending',
+            startedAt: null,
+            lastError: processingError,
+            retryAfter: admin.firestore.Timestamp.fromDate(retryAfterTime)
+          });
+          console.log(`🔄 Queue item ${queueId} will be retried (attempt ${attempts}/${MAX_ATTEMPTS}) after ${retryAfterTime.toLocaleTimeString()}`);
+        }
+      }
+
+      res.status(200).json({
+        message: 'Queue item processed',
+        queueId: queueId,
+        orderNumber: queueData.order_number,
+        success: processingResult && processingResult.success
+      });
+
+    } catch (error) {
+      console.error('❌ Error in queue processor:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+});
+
+// Scheduled function to process queue continuously
+// Runs every minute and processes 5 items with delays between them (5 orders/minute)
+exports.processEFMQueueScheduled = functions.pubsub.schedule('* * * * *').onRun(async (context) => {
+  const PROCESSING_DELAY_MS = 1000; // 1 second delay between items
+  const MAX_ITEMS_PER_RUN = 5; // Process up to 5 items per scheduled run (5 orders/minute)
+  const MAX_ATTEMPTS = 3;
+
+  try {
+    console.log('🔄 Scheduled queue processing triggered');
+
+    let processedCount = 0;
+    let hasMoreItems = true;
+
+    // Process multiple items in sequence with delays
+    while (hasMoreItems && processedCount < MAX_ITEMS_PER_RUN) {
+      // Find next pending item (FIFO - oldest first)
+      // Only pick up items that are ready for retry (retryAfter is null or in the past)
+      const now = admin.firestore.Timestamp.now();
+      const pendingSnapshot = await db.collection('efm_webhook_queue')
+        .where('status', '==', 'pending')
+        .orderBy('priority', 'asc')
+        .limit(1)
+        .get();
+      
+      // Filter out items that have retryAfter set in the future
+      const readyItems = pendingSnapshot.docs.filter(doc => {
+        const data = doc.data();
+        const retryAfter = data.retryAfter;
+        return !retryAfter || retryAfter.toMillis() <= now.toMillis();
+      });
+      
+      if (readyItems.length === 0) {
+        console.log('✅ No pending items ready for processing (some may be waiting for retry)');
+        hasMoreItems = false;
+        break;
+      }
+      
+      const queueItem = readyItems[0];
+      const queueData = queueItem.data();
+      const queueId = queueItem.id;
+
+      // Validate queue item structure
+      const validation = validateQueueItem(queueData, queueId);
+      if (!validation.valid) {
+        console.error(`❌ Invalid queue item ${queueId}: ${validation.error}`);
+        // Mark as failed immediately - corrupted data shouldn't be retried
+        await queueItem.ref.update({
+          status: 'failed',
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastError: validation.error,
+          result: { success: false, error: validation.error, corrupted: true }
+        });
+        // Continue to next item instead of breaking
+        processedCount++;
+        continue;
+      }
+
+      console.log(`📦 Processing queue item ${queueId} for order ${queueData.order_number} (${processedCount + 1}/${MAX_ITEMS_PER_RUN})`);
+
+      // Mark as processing
+      await queueItem.ref.update({
+        status: 'processing',
+        startedAt: admin.firestore.FieldValue.serverTimestamp(),
+        attempts: (queueData.attempts || 0) + 1,
+        retryAfter: null // Clear retryAfter since we're processing it now
+      });
+
+      // Process the webhook (already validated above)
+      const webhookData = queueData.webhook_data;
+      let processingResult = null;
+      let processingError = null;
+
+      try {
+        // Call the existing processing function
+        await processEFMBoxAssignment(webhookData);
+        processingResult = { success: true };
+      } catch (error) {
+        processingError = error.message || 'Unknown error';
+        console.error(`❌ Error processing queue item ${queueId}:`, error);
+      }
+
+      // Update queue item with result
+      if (processingResult && processingResult.success) {
+        await queueItem.ref.update({
+          status: 'completed',
+          completedAt: admin.firestore.FieldValue.serverTimestamp(),
+          result: processingResult
+        });
+        console.log(`✅ Queue item ${queueId} completed successfully`);
+      } else {
+        // Check if we should retry or mark as failed
+        const attempts = (queueData.attempts || 0) + 1;
+        if (attempts >= MAX_ATTEMPTS) {
+          await queueItem.ref.update({
+            status: 'failed',
+            completedAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastError: processingError,
+            result: { success: false, error: processingError }
+          });
+          console.log(`❌ Queue item ${queueId} failed after ${attempts} attempts`);
+          
+          // Send failure notification
+          await sendSlackFailureNotification(queueData, queueId, processingError, attempts);
+        } else {
+          // Retry - mark as pending again but set retryAfter to prevent immediate retry in same run
+          const retryAfterTime = new Date(Date.now() + 60000); // 1 minute from now
+          await queueItem.ref.update({
+            status: 'pending',
+            startedAt: null,
+            lastError: processingError,
+            retryAfter: admin.firestore.Timestamp.fromDate(retryAfterTime)
+          });
+          console.log(`🔄 Queue item ${queueId} will be retried (attempt ${attempts}/${MAX_ATTEMPTS}) after ${retryAfterTime.toLocaleTimeString()}`);
+        }
+      }
+
+      processedCount++;
+
+      // Add delay before processing next item (except for the last one)
+      if (hasMoreItems && processedCount < MAX_ITEMS_PER_RUN) {
+        console.log(`⏳ Waiting ${PROCESSING_DELAY_MS}ms before next item...`);
+        await new Promise(resolve => setTimeout(resolve, PROCESSING_DELAY_MS));
+      }
+    }
+
+    console.log(`✅ Queue processing complete: processed ${processedCount} items`);
+    return null;
+  } catch (error) {
+    console.error('❌ Error in scheduled queue processor:', error);
+    return null;
+  }
+});
+
+// Recovery function for stuck items in "processing" state
+// Runs every 10 minutes to find and reset items stuck in processing
+exports.recoverStuckQueueItems = functions.pubsub.schedule('*/10 * * * *').onRun(async (context) => {
+  const STUCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes - items stuck longer than this will be recovered
+  const STUCK_TIMEOUT_SECONDS = STUCK_TIMEOUT_MS / 1000;
+
+  try {
+    console.log('🔍 Starting recovery scan for stuck queue items...');
+
+    // Get current timestamp
+    const now = admin.firestore.Timestamp.now();
+    const cutoffTime = new Date(now.toMillis() - STUCK_TIMEOUT_MS);
+    const cutoffTimestamp = admin.firestore.Timestamp.fromDate(cutoffTime);
+
+    // Find all items stuck in "processing" state
+    const stuckSnapshot = await db.collection('efm_webhook_queue')
+      .where('status', '==', 'processing')
+      .get();
+
+    let recoveredCount = 0;
+    const itemsToRecover = [];
+
+    // Collect items that need recovery
+    stuckSnapshot.forEach((doc) => {
+      const data = doc.data();
+      const startedAt = data.startedAt;
+
+      // Check if startedAt exists and is older than cutoff
+      if (startedAt && startedAt.toMillis() < cutoffTimestamp.toMillis()) {
+        const ageMinutes = Math.round((now.toMillis() - startedAt.toMillis()) / 60000);
+        itemsToRecover.push({
+          doc: doc,
+          orderNumber: data.order_number || 'Unknown',
+          ageMinutes: ageMinutes,
+          reason: 'stuck'
+        });
+      } else if (!startedAt) {
+        // Item marked as processing but has no startedAt timestamp - recover it
+        itemsToRecover.push({
+          doc: doc,
+          orderNumber: data.order_number || 'Unknown',
+          ageMinutes: null,
+          reason: 'missing_startedAt'
+        });
+      }
+    });
+
+    // Process in batches (Firestore batch limit is 500 operations)
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < itemsToRecover.length; i += BATCH_SIZE) {
+      const batch = db.batch();
+      const batchItems = itemsToRecover.slice(i, i + BATCH_SIZE);
+
+      for (const item of batchItems) {
+        if (item.reason === 'stuck') {
+          console.log(`🔄 Recovering stuck item ${item.doc.id} for order ${item.orderNumber} (stuck for ${item.ageMinutes} minutes)`);
+        } else {
+          console.log(`🔄 Recovering stuck item ${item.doc.id} for order ${item.orderNumber} (missing startedAt)`);
+        }
+
+        // Reset to pending for retry
+        batch.update(item.doc.ref, {
+          status: 'pending',
+          startedAt: null,
+          // Keep lastError so we know what happened
+          // Don't increment attempts - this is recovery, not a retry
+        });
+
+        recoveredCount++;
+      }
+
+      // Commit this batch
+      if (batchItems.length > 0) {
+        await batch.commit();
+        console.log(`✅ Committed batch: ${batchItems.length} items recovered (${recoveredCount}/${itemsToRecover.length} total)`);
+      }
+    }
+
+    if (recoveredCount > 0) {
+      console.log(`✅ Recovery complete: ${recoveredCount} stuck queue item(s) recovered`);
+    } else {
+      console.log('✅ No stuck items found');
+    }
+
+    return null;
+  } catch (error) {
+    console.error('❌ Error in recovery function:', error);
+    return null;
+  }
+});
 
 exports.shipHeroWebhook = functions.https.onRequest((req, res) => {
   cors(req, res, async () => {

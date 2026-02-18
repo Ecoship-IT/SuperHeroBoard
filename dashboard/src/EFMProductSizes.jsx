@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { db } from './firebase';
-import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc, addDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc, addDoc, where, getDocs } from 'firebase/firestore';
 
 function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [products, setProducts] = useState([]);
   const [isAddingProduct, setIsAddingProduct] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
-  const [newProduct, setNewProduct] = useState({ sku: '', value: '' });
+  const [newProduct, setNewProduct] = useState({ sku: '', name: '', value: '' });
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState('sku');
   const [sortDirection, setSortDirection] = useState('asc');
@@ -64,6 +64,15 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
   const [calculationResult, setCalculationResult] = useState(null);
   const [isCalculating, setIsCalculating] = useState(false);
 
+  // Processing logs state
+  const [processingLogs, setProcessingLogs] = useState([]);
+  const [logSearchTerm, setLogSearchTerm] = useState('');
+  const [logStatusFilter, setLogStatusFilter] = useState('all'); // 'all', 'success', 'failed'
+  const [logSortBy, setLogSortBy] = useState('processedAt');
+  const [logSortDirection, setLogSortDirection] = useState('desc');
+  const [logCurrentPage, setLogCurrentPage] = useState(1);
+  const [logPageSize, setLogPageSize] = useState(25);
+
   // Load products from Firestore
   useEffect(() => {
     const q = query(collection(db, 'efm_products'), orderBy('sku', 'asc'));
@@ -90,6 +99,37 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
     return () => unsubscribe();
   }, []);
 
+  // Load processing logs from Firestore
+  useEffect(() => {
+    const q = query(collection(db, 'efm_box_assignments'), orderBy('processedAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map((doc) => ({ 
+        id: doc.id, 
+        ...doc.data() 
+      }));
+      setProcessingLogs(data);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Expose Firebase functions to window for console scripts
+  useEffect(() => {
+    window.__EFM_FIREBASE__ = {
+      db,
+      collection,
+      query,
+      where,
+      getDocs,
+      updateDoc,
+      addDoc,
+      serverTimestamp,
+      doc
+    };
+    return () => {
+      delete window.__EFM_FIREBASE__;
+    };
+  }, []);
+
   // Add new product
   const handleAddProduct = async (e) => {
     e.preventDefault();
@@ -98,11 +138,12 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
     try {
       await addDoc(collection(db, 'efm_products'), {
         sku: newProduct.sku.trim(),
+        name: newProduct.name?.trim() || '',
         value: parseFloat(newProduct.value) || 0,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
-      setNewProduct({ sku: '', value: '' });
+      setNewProduct({ sku: '', name: '', value: '' });
       setIsAddingProduct(false);
     } catch (error) {
       console.error('Error adding product:', error);
@@ -142,6 +183,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
   const filteredAndSortedProducts = products
     .filter(product => 
       product.sku?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      product.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       product.value?.toString().includes(searchTerm)
     )
     .sort((a, b) => {
@@ -360,6 +402,53 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
       setBoxSortDirection('asc');
     }
     setBoxCurrentPage(1);
+  };
+
+  // Filter and sort processing logs
+  const filteredAndSortedLogs = processingLogs
+    .filter(log => {
+      // Status filter
+      if (logStatusFilter === 'success' && !log.success) return false;
+      if (logStatusFilter === 'failed' && log.success) return false;
+      
+      // Search filter
+      return (
+        log.order_number?.toLowerCase().includes(logSearchTerm.toLowerCase()) ||
+        log.order_id?.toString().includes(logSearchTerm) ||
+        log.boxName?.toLowerCase().includes(logSearchTerm.toLowerCase()) ||
+        log.error?.toLowerCase().includes(logSearchTerm.toLowerCase())
+      );
+    })
+    .sort((a, b) => {
+      let aValue = a[logSortBy];
+      let bValue = b[logSortBy];
+      
+      if (logSortBy === 'processedAt') {
+        aValue = aValue?.toDate?.() || new Date(aValue || 0);
+        bValue = bValue?.toDate?.() || new Date(bValue || 0);
+      } else if (logSortBy === 'totalSize' || logSortBy === 'processingTimeMs') {
+        aValue = parseFloat(aValue) || 0;
+        bValue = parseFloat(bValue) || 0;
+      } else {
+        aValue = aValue?.toString().toLowerCase() || '';
+        bValue = bValue?.toString().toLowerCase() || '';
+      }
+      
+      if (logSortDirection === 'asc') {
+        return aValue > bValue ? 1 : -1;
+      } else {
+        return aValue < bValue ? 1 : -1;
+      }
+    });
+
+  const handleLogSort = (field) => {
+    if (logSortBy === field) {
+      setLogSortDirection(logSortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setLogSortBy(field);
+      setLogSortDirection('desc');
+    }
+    setLogCurrentPage(1);
   };
 
   // Box Pagination component with blue theme
@@ -664,8 +753,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 <span>SuperHero Board</span>
               </div>
             </Link>
-            {/* Temporarily hidden Level Up Log */}
-            {/* <Link 
+            <Link 
               to="/level-up-log" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
@@ -685,7 +773,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 </svg>
                 <span>Level Up Log</span>
               </div>
-            </Link> */}
+            </Link>
             <Link 
               to="/efm-product-sizes" 
               className="block px-6 py-3 text-gray-700 bg-blue-50 border-blue-200 rounded-lg transition-all duration-200 text-lg font-semibold border shadow-sm"
@@ -850,8 +938,15 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                     required
                   />
                   <input
+                    type="text"
+                    value={newProduct.name}
+                    onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                    placeholder="Name"
+                    className="flex-1 border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  />
+                  <input
                     type="number"
-                    step="0.01"
+                    step="0.001"
                     value={newProduct.value}
                     onChange={(e) => setNewProduct({ ...newProduct, value: e.target.value })}
                     placeholder="Value"
@@ -868,7 +963,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                     type="button"
                     onClick={() => {
                       setIsAddingProduct(false);
-                      setNewProduct({ sku: '', value: '' });
+                      setNewProduct({ sku: '', name: '', value: '' });
                     }}
                     className="bg-gray-400 text-white px-4 py-2 rounded hover:bg-gray-500 transition-colors"
                   >
@@ -891,6 +986,20 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                           <span>SKU</span>
                         <svg className={`w-4 h-4 ${sortBy === 'sku' ? 'text-gray-700' : 'text-gray-400'}`} viewBox="0 0 20 20" fill="currentColor">
                           <path fillRule="evenodd" d={sortBy === 'sku' && sortDirection === 'desc' 
+                            ? "M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"
+                            : "M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                          } clipRule="evenodd" />
+                        </svg>
+                      </span>
+                    </th>
+                                          <th 
+                        className="group px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                        onClick={() => handleSort('name')}
+                      >
+                        <span className="flex items-center space-x-2">
+                          <span>Name</span>
+                        <svg className={`w-4 h-4 ${sortBy === 'name' ? 'text-gray-700' : 'text-gray-400'}`} viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d={sortBy === 'name' && sortDirection === 'desc' 
                             ? "M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"
                             : "M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
                           } clipRule="evenodd" />
@@ -925,10 +1034,21 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                           <input
                             type="text"
                             defaultValue={product.sku}
-                            onBlur={(e) => handleUpdateProduct(product.id, { sku: e.target.value, value: product.value })}
+                            onBlur={(e) => {
+                              // Delay to check if focus moved to another input in the same row
+                              setTimeout(() => {
+                                const activeElement = document.activeElement;
+                                const row = e.target.closest('tr');
+                                const isFocusInRow = row && row.contains(activeElement);
+                                if (!isFocusInRow) {
+                                  handleUpdateProduct(product.id, { sku: e.target.value, name: product.name || '', value: product.value });
+                                }
+                              }, 100);
+                            }}
                             onKeyPress={(e) => {
                               if (e.key === 'Enter') {
-                                handleUpdateProduct(product.id, { sku: e.target.value, value: product.value });
+                                e.target.blur();
+                                handleUpdateProduct(product.id, { sku: e.target.value, name: product.name || '', value: product.value });
                               }
                             }}
                             className="border rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-green-500 text-base"
@@ -941,19 +1061,59 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                       <td className="px-4 py-3 whitespace-nowrap">
                         {editingProduct === product.id ? (
                           <input
-                            type="number"
-                            step="0.01"
-                            defaultValue={product.value}
-                            onBlur={(e) => handleUpdateProduct(product.id, { sku: product.sku, value: e.target.value })}
+                            type="text"
+                            defaultValue={product.name || ''}
+                            onBlur={(e) => {
+                              // Delay to check if focus moved to another input in the same row
+                              setTimeout(() => {
+                                const activeElement = document.activeElement;
+                                const row = e.target.closest('tr');
+                                const isFocusInRow = row && row.contains(activeElement);
+                                if (!isFocusInRow) {
+                                  handleUpdateProduct(product.id, { sku: product.sku, name: e.target.value, value: product.value });
+                                }
+                              }, 100);
+                            }}
                             onKeyPress={(e) => {
                               if (e.key === 'Enter') {
-                                handleUpdateProduct(product.id, { sku: product.sku, value: e.target.value });
+                                e.target.blur();
+                                handleUpdateProduct(product.id, { sku: product.sku, name: e.target.value, value: product.value });
+                              }
+                            }}
+                            className="border rounded px-2 py-1 w-full focus:outline-none focus:ring-2 focus:ring-green-500 text-base"
+                            placeholder="Product name"
+                          />
+                        ) : (
+                          <span className="text-base text-gray-700">{product.name || '—'}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {editingProduct === product.id ? (
+                          <input
+                            type="number"
+                            step="0.001"
+                            defaultValue={product.value}
+                            onBlur={(e) => {
+                              // Delay to check if focus moved to another input in the same row
+                              setTimeout(() => {
+                                const activeElement = document.activeElement;
+                                const row = e.target.closest('tr');
+                                const isFocusInRow = row && row.contains(activeElement);
+                                if (!isFocusInRow) {
+                                  handleUpdateProduct(product.id, { sku: product.sku, name: product.name || '', value: e.target.value });
+                                }
+                              }, 100);
+                            }}
+                            onKeyPress={(e) => {
+                              if (e.key === 'Enter') {
+                                e.target.blur();
+                                handleUpdateProduct(product.id, { sku: product.sku, name: product.name || '', value: e.target.value });
                               }
                             }}
                             className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-green-500 text-base"
                           />
                         ) : (
-                          <span className="text-base text-gray-900">{parseFloat(product.value).toFixed(2)}</span>
+                          <span className="text-base text-gray-900">{parseFloat(product.value).toFixed(3)}</span>
                         )}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
@@ -1127,9 +1287,20 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                           <input
                             type="text"
                             defaultValue={boxSize.boxSize}
-                            onBlur={(e) => handleUpdateBoxSize(boxSize.id, { boxSize: e.target.value, maxProductSize: boxSize.maxProductSize })}
+                            onBlur={(e) => {
+                              // Delay to check if focus moved to another input in the same row
+                              setTimeout(() => {
+                                const activeElement = document.activeElement;
+                                const row = e.target.closest('tr');
+                                const isFocusInRow = row && row.contains(activeElement);
+                                if (!isFocusInRow) {
+                                  handleUpdateBoxSize(boxSize.id, { boxSize: e.target.value, maxProductSize: boxSize.maxProductSize });
+                                }
+                              }, 100);
+                            }}
                             onKeyPress={(e) => {
                               if (e.key === 'Enter') {
+                                e.target.blur();
                                 handleUpdateBoxSize(boxSize.id, { boxSize: e.target.value, maxProductSize: boxSize.maxProductSize });
                               }
                             }}
@@ -1146,16 +1317,27 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                             type="number"
                             step="0.01"
                             defaultValue={boxSize.maxProductSize}
-                            onBlur={(e) => handleUpdateBoxSize(boxSize.id, { boxSize: boxSize.boxSize, maxProductSize: e.target.value })}
+                            onBlur={(e) => {
+                              // Delay to check if focus moved to another input in the same row
+                              setTimeout(() => {
+                                const activeElement = document.activeElement;
+                                const row = e.target.closest('tr');
+                                const isFocusInRow = row && row.contains(activeElement);
+                                if (!isFocusInRow) {
+                                  handleUpdateBoxSize(boxSize.id, { boxSize: boxSize.boxSize, maxProductSize: e.target.value });
+                                }
+                              }, 100);
+                            }}
                             onKeyPress={(e) => {
                               if (e.key === 'Enter') {
+                                e.target.blur();
                                 handleUpdateBoxSize(boxSize.id, { boxSize: boxSize.boxSize, maxProductSize: e.target.value });
                               }
                             }}
                             className="border rounded px-2 py-1 w-24 focus:outline-none focus:ring-2 focus:ring-blue-500 text-base"
                           />
                         ) : (
-                          <span className="text-base text-gray-900">{parseFloat(boxSize.maxProductSize).toFixed(2)}</span>
+                          <span className="text-base text-gray-900">{parseFloat(boxSize.maxProductSize).toFixed(3)}</span>
                         )}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
@@ -1323,7 +1505,7 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                     <div className="bg-gray-50 p-4 rounded-lg">
                       <h4 className="font-semibold mb-2">Calculation Summary</h4>
                       <div className="space-y-1 text-sm">
-                        <p><span className="font-medium">Total Size:</span> {calculationResult.totalSize?.toFixed(2) || 'N/A'}</p>
+                        <p><span className="font-medium">Total Size:</span> {calculationResult.totalSize?.toFixed(3) || 'N/A'}</p>
                         <p><span className="font-medium">Selected Box:</span> {calculationResult.selectedBox?.boxSize || 'None'}</p>
                         <p><span className="font-medium">Box Capacity:</span> {calculationResult.selectedBox?.maxProductSize || 'N/A'}</p>
                       </div>
@@ -1350,13 +1532,13 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                             <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                               <td className="px-4 py-2 border-b">{item.sku}</td>
                               <td className="px-4 py-2 border-b">{item.quantity}</td>
-                              <td className="px-4 py-2 border-b">{item.unitSize.toFixed(2)}</td>
-                              <td className="px-4 py-2 border-b font-medium">{item.totalSize.toFixed(2)}</td>
+                              <td className="px-4 py-2 border-b">{item.unitSize.toFixed(3)}</td>
+                              <td className="px-4 py-2 border-b font-medium">{item.totalSize.toFixed(3)}</td>
                             </tr>
                           ))}
                           <tr className="bg-purple-50 font-semibold">
                             <td className="px-4 py-2 border-b" colSpan="3">Total Order Size:</td>
-                            <td className="px-4 py-2 border-b">{calculationResult.totalSize?.toFixed(2)}</td>
+                            <td className="px-4 py-2 border-b">{calculationResult.totalSize?.toFixed(3)}</td>
                           </tr>
                         </tbody>
                       </table>
@@ -1375,6 +1557,146 @@ function EFMProductSizes({ isAuthenticated, isGuest, onLogout }) {
                 </details>
               </div>
             )}
+          </div>
+
+          {/* Processing Logs Section */}
+          <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mb-10">
+            <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-white">Box Assignment Processing Logs</h2>
+                  <p className="text-blue-100 mt-1">View all EFM order box assignment processing results</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Search and Filters */}
+            <div className="p-6 border-b bg-gray-50">
+              <div className="flex flex-wrap gap-4 items-end">
+                <div className="flex-1 min-w-[200px]">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Search Logs</label>
+                  <input
+                    type="text"
+                    value={logSearchTerm}
+                    onChange={(e) => {
+                      setLogSearchTerm(e.target.value);
+                      setLogCurrentPage(1);
+                    }}
+                    placeholder="Search by order number, order ID, box name, or error..."
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+                <div className="min-w-[150px]">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Filter by Status</label>
+                  <select
+                    value={logStatusFilter}
+                    onChange={(e) => {
+                      setLogStatusFilter(e.target.value);
+                      setLogCurrentPage(1);
+                    }}
+                    className="w-full border rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="all">All Statuses</option>
+                    <option value="success">Success Only</option>
+                    <option value="failed">Failed Only</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <div className="text-sm text-gray-600">
+                    Showing {filteredAndSortedLogs.length} of {processingLogs.length} logs
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Logs Table */}
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-base divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th 
+                      className="group px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                      onClick={() => handleLogSort('processedAt')}
+                    >
+                      <span className="flex items-center space-x-2">
+                        <span>Processed At</span>
+                        <svg className={`w-4 h-4 ${logSortBy === 'processedAt' ? 'text-gray-700' : 'text-gray-400'}`} viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d={logSortBy === 'processedAt' && logSortDirection === 'desc' 
+                            ? "M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"
+                            : "M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                          } clipRule="evenodd" />
+                        </svg>
+                      </span>
+                    </th>
+                    <th 
+                      className="group px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:bg-gray-100"
+                      onClick={() => handleLogSort('order_number')}
+                    >
+                      <span className="flex items-center space-x-2">
+                        <span>Order #</span>
+                        <svg className={`w-4 h-4 ${logSortBy === 'order_number' ? 'text-gray-700' : 'text-gray-400'}`} viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d={logSortBy === 'order_number' && logSortDirection === 'desc' 
+                            ? "M14.707 12.707a1 1 0 01-1.414 0L10 9.414l-3.293 3.293a1 1 0 01-1.414-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 010 1.414z"
+                            : "M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                          } clipRule="evenodd" />
+                        </svg>
+                      </span>
+                    </th>
+                    <th className="px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                    <th className="px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider">Total Size</th>
+                    <th className="px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider">Box Name</th>
+                    <th className="px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider">Request ID</th>
+                    <th className="px-4 py-4 text-left text-sm font-medium text-gray-500 uppercase tracking-wider">Error</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {paginateData(filteredAndSortedLogs, logPageSize, logCurrentPage).map((log, idx) => (
+                    <tr key={log.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                      <td className="px-4 py-3 border-b text-sm">
+                        {log.processedAt?.toDate ? 
+                          new Date(log.processedAt.toDate()).toLocaleString() : 
+                          log.processedAt ? new Date(log.processedAt).toLocaleString() : '—'
+                        }
+                      </td>
+                      <td className="px-4 py-3 border-b font-medium">{log.order_number || '—'}</td>
+                      <td className="px-4 py-3 border-b">
+                        {log.success ? (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                            Success
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                            Failed
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 border-b">{log.totalSize?.toFixed(3) || '—'}</td>
+                      <td className="px-4 py-3 border-b">{log.boxName || '—'}</td>
+                      <td className="px-4 py-3 border-b text-xs font-mono">{log.requestId || '—'}</td>
+                      <td className="px-4 py-3 border-b text-sm text-red-600 max-w-xs truncate" title={log.error || ''}>
+                        {log.error || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                  {paginateData(filteredAndSortedLogs, logPageSize, logCurrentPage).length === 0 && (
+                    <tr>
+                      <td colSpan="7" className="px-4 py-8 text-center text-gray-500">
+                        {logSearchTerm ? 'No logs match your search' : 'No processing logs yet'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Logs Pagination */}
+            <Pagination
+              total={filteredAndSortedLogs.length}
+              pageSize={logPageSize}
+              currentPage={logCurrentPage}
+              setCurrentPage={setLogCurrentPage}
+              setPageSize={setLogPageSize}
+            />
           </div>
         </div>
       </div>

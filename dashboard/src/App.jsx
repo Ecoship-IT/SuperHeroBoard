@@ -180,6 +180,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
   const [refreshLog, setRefreshLog] = useState([]);
+  const [isProcessingData, setIsProcessingData] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
 
   // Filter states
@@ -216,7 +218,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   // State for manual completion confirmation
   const [confirmingManual, setConfirmingManual] = useState(null); // orderNumber being confirmed
 
-  const pageSizeOptions = [25, 50, 100, 250, 500];
+  const pageSizeOptions = [50, 100, 250, 500, 1000];
   const dateRangeOptions = [
     { value: 'today', label: 'Today' },
     { value: 'yesterday', label: 'Yesterday' },
@@ -268,23 +270,103 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // State to track current date for proper day transitions
+  const [currentDate, setCurrentDate] = useState(() => {
+    const today = new Date();
+    return today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+  });
+
+  // Update date every minute to handle day transitions
   useEffect(() => {
-    const q = query(collection(db, 'orders'), orderBy('allocated_at', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setOrders(data);
-    });
-    return () => unsubscribe();
+    const updateDate = () => {
+      const today = new Date();
+      const newDate = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
+      setCurrentDate(newDate);
+    };
+
+    // Update immediately
+    updateDate();
+
+    // Set up interval to check every minute
+    const interval = setInterval(updateDate, 60000); // 60 seconds
+
+    return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const q = query(collection(db, 'not_ready_to_ship'), orderBy('removed_at', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setNotReadyToShipOrders(data);
+  // Memoize date calculations - used in multiple places
+  const todayDate = useMemo(() => {
+    const today = new Date();
+    return {
+      date: today,
+      eastern: today.toLocaleDateString('en-US', {timeZone: 'America/New_York'}),
+      startOfDay: new Date(today.getFullYear(), today.getMonth(), today.getDate())
+    };
+  }, [currentDate]); // Recalculate when date changes
+
+  // Memoize status check functions - used in multiple filters
+  const statusChecks = useMemo(() => {
+    const shippedStatuses = ['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'];
+    
+    return {
+      isShipped: (order) => order.status === 'shipped',
+      isShippable: (order) => !shippedStatuses.includes(order.status),
+      isReadyToShip: (order) => order.ready_to_ship === true
+    };
+  }, []); // Calculate once
+
+  // Memoize account lookup map - faster than object property access
+  const accountLookup = useMemo(() => {
+    const lookup = new Map(); // Map is faster than object for lookups
+    
+    orders.forEach(order => {
+      if (!lookup.has(order.account_uuid)) {
+        lookup.set(
+          order.account_uuid, 
+          accountMap[order.account_uuid] || order.account_uuid || 'Unknown'
+        );
+      }
     });
-    return () => unsubscribe();
-  }, []);
+    
+    return lookup;
+  }, [orders, accountMap]);
+
+  // Real-time listeners for orders and not_ready_to_ship collections
+  // This replaces expensive polling with efficient real-time updates
+  useEffect(() => {
+    console.log('🔄 Setting up real-time listeners for orders...');
+    
+    // Subscribe to orders collection
+    const ordersQuery = query(collection(db, 'orders'), orderBy('allocated_at', 'desc'));
+    const unsubscribeOrders = onSnapshot(ordersQuery, (snapshot) => {
+      const ordersData = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setOrders(ordersData);
+      console.log(`✅ Orders updated - ${ordersData.length} orders`);
+      
+      // Mark initial load as complete after first snapshot
+      if (isInitialLoad) {
+        setIsInitialLoad(false);
+      }
+    }, (error) => {
+      console.error('❌ Orders listener error:', error);
+    });
+    
+    // Subscribe to not_ready_to_ship collection
+    const notReadyQuery = query(collection(db, 'not_ready_to_ship'), orderBy('removed_at', 'desc'));
+    const unsubscribeNotReady = onSnapshot(notReadyQuery, (snapshot) => {
+      const notReadyData = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setNotReadyToShipOrders(notReadyData);
+      console.log(`✅ Not ready to ship updated - ${notReadyData.length} orders`);
+    }, (error) => {
+      console.error('❌ Not ready listener error:', error);
+    });
+    
+    // Cleanup: unsubscribe from both listeners when component unmounts
+    return () => {
+      console.log('🔌 Disconnecting real-time listeners...');
+      unsubscribeOrders();
+      unsubscribeNotReady();
+    };
+  }, []); // Only run once on mount
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -509,13 +591,12 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
 
   // Memoize expensive computations
   const ordersToShipToday = useMemo(() => {
-    return orders.filter(
-      order => 
-        needsShippedToday(order) &&
-        !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
-        order.ready_to_ship === true
+    return orders.filter(order => 
+      needsShippedToday(order) &&
+      statusChecks.isShippable(order) &&
+      statusChecks.isReadyToShip(order)
     );
-  }, [orders]);
+  }, [orders, statusChecks]);
 
   const needsShippedTomorrow = (order) => {
     // Check for ShipHero override first
@@ -585,11 +666,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   }, [orders]);
 
   const shippedToday = useMemo(() => {
-    const today = new Date();
-    const todayEastern = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-    
     return orders.filter(order => {
-      if (order.status !== 'shipped' || !order.shippedAt) return false;
+      if (!statusChecks.isShipped(order) || !order.shippedAt) return false;
       try {
         // Inline UTC parsing to avoid circular dependency
         let shipDate;
@@ -610,21 +688,21 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
         
         // Compare using Eastern timezone like the hourly chart
         const shipDateEastern = shipDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-        return shipDateEastern === todayEastern;
+        return shipDateEastern === todayDate.eastern;
       } catch {
         return false;
       }
     });
-  }, [orders]);
+  }, [orders, statusChecks, todayDate.eastern]);
 
   const groupedSorted = useMemo(() => {
     const grouped = {};
     ordersToShipToday.forEach(order => {
-      const name = accountMap[order.account_uuid] || order.account_uuid || 'Unknown';
+      const name = accountLookup.get(order.account_uuid);
       grouped[name] = (grouped[name] || 0) + 1;
     });
     return Object.entries(grouped).sort((a, b) => b[1] - a[1]);
-  }, [ordersToShipToday]);
+  }, [ordersToShipToday, accountLookup]);
 
   const visibleClients = useMemo(() => {
     return showAllClients ? groupedSorted : groupedSorted.slice(0, 10);
@@ -651,8 +729,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       let aValue, bValue;
 
       if (sortField === 'client') {
-        aValue = accountMap[a.account_uuid] || a.account_uuid || 'Unknown';
-        bValue = accountMap[b.account_uuid] || b.account_uuid || 'Unknown';
+        aValue = accountLookup.get(a.account_uuid);
+        bValue = accountLookup.get(b.account_uuid);
       } else if (sortField === 'allocated_at' || sortField === 'shippedAt') {
         aValue = a[sortField]?.toDate?.() || new Date(a[sortField] || 0);
         bValue = b[sortField]?.toDate?.() || new Date(b[sortField] || 0);
@@ -667,13 +745,13 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
         return aValue < bValue ? 1 : -1;
       }
     });
-  }, [orders, sortField, sortDirection]);
+  }, [orders, sortField, sortDirection, accountLookup]);
 
   const exportToCSV = useCallback((data, filename) => {
     const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Required Ship Date', 'Shipped At', 'SLA Met'];
     const csvData = data.map(order => [
       order.order_number,
-      accountMap[order.account_uuid] || order.account_uuid || 'Unknown',
+      accountLookup.get(order.account_uuid),
       order.status,
       Array.isArray(order.line_items) ? order.line_items.length : 0,
       order.allocated_at?.toDate?.()?.toLocaleString() || new Date(order.allocated_at).toLocaleString(),
@@ -714,7 +792,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     link.href = URL.createObjectURL(blob);
     link.download = filename;
     link.click();
-  }, []);
+  }, [accountLookup]);
 
   const Pagination = ({ total, pageSize, currentPage, setCurrentPage, setPageSize }) => {
     const totalPages = Math.ceil(total / pageSize);
@@ -1137,6 +1215,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
 
       console.log('🔍 Sending GraphQL query for order:', orderNumber);
       console.log('📤 Query:', JSON.stringify(queryBody, null, 2));
+      console.log('🔑 Token loaded:', import.meta.env.VITE_SHIPHERO_API_TOKEN ? `Yes (length: ${import.meta.env.VITE_SHIPHERO_API_TOKEN.length})` : 'No - Token is missing!');
 
       const response = await fetch('https://public-api.shiphero.com/graphql', {
         method: 'POST',
@@ -1460,6 +1539,26 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     }));
   }, [orders]);
 
+  // Loading screen component
+  const LoadingScreen = () => (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="text-center">
+        <img 
+          src="/face.png" 
+          alt="Loading..." 
+          className="animate-spin-counter-clockwise h-24 w-24 mx-auto mb-4"
+        />
+        <h2 className="text-2xl font-semibold text-gray-800 mb-2">Loading SuperHero Board</h2>
+        <p className="text-gray-600">This may take a moment...</p>
+      </div>
+    </div>
+  );
+
+  // Show loading screen during initial load
+  if (isInitialLoad) {
+    return <LoadingScreen />;
+  }
+
   return (
     <div className="relative min-h-screen">
       {/* Hamburger Menu Button - Desktop only */}
@@ -1548,8 +1647,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 <span>SuperHero Board</span>
               </div>
             </a>
-            {/* Temporarily hidden Level Up Log */}
-            {/* <Link 
+            <Link 
               to="/level-up-log" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
@@ -1569,7 +1667,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </svg>
                 <span>Level Up Log</span>
               </div>
-            </Link> */}
+            </Link>
             {isAuthenticated && userRole === 'admin' && (
               <Link 
                 to="/efm-product-sizes" 
@@ -1614,7 +1712,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 <span>Location Builder</span>
               </div>
             </Link>
-            <Link 
+            {/* DISABLED: Not being used, has expensive real-time listeners */}
+            {/* <Link 
               to="/compliance-board" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
@@ -1634,7 +1733,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </svg>
                 <span>Compliance Board</span>
               </div>
-            </Link>
+            </Link> */}
             <Link 
               to="/countdown" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
@@ -1717,31 +1816,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                     />
                   </svg>
                 </button>
-                {/* Mobile Count/Status toggle */}
-                <div className="flex items-center bg-gray-200 rounded-full p-1">
-                  <Link
-                    to="/"
-                    className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-all duration-200 ${
-                      location.pathname === '/' 
-                        ? 'text-white shadow-sm' 
-                        : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
-                    }`}
-                    style={location.pathname === '/' ? { backgroundColor: '#16a34a' } : {}}
-                  >
-                    Count
-                  </Link>
-                  <Link
-                    to="/superhero-alt"
-                    className={`px-3 py-1.5 text-sm font-semibold rounded-full transition-all duration-200 ${
-                      location.pathname === '/superhero-alt' 
-                        ? 'text-white shadow-sm' 
-                        : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
-                    }`}
-                    style={location.pathname === '/superhero-alt' ? { backgroundColor: '#16a34a' } : {}}
-                  >
-                    Status
-                  </Link>
-                </div>
+                {/* Toggle removed - only one view now */}
               </div>
               {/* Refresh button for mobile */}
               {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
@@ -1814,6 +1889,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
               Real-time order overview for when <i>ship</i> gets real
             </p>
           </div>
+          {/* Refresh Controls - Both buttons in one container */}
+          <div className="absolute top-10 right-0 flex flex-col items-end space-y-1.5">
             {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
             <button
               onClick={() => {
@@ -1843,7 +1920,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 processOrders(ordersToVerify, notReadyOrdersToVerify);
               }}
               disabled={isRefreshing}
-              className={`absolute top-10 right-0 px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
+              className={`px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
                 isRefreshing ? 'bg-blue-600 opacity-75 cursor-not-allowed' :
                 isRefreshConfirming ? 'bg-red-600 hover:bg-red-700 text-white' : 
                 'bg-slate-700 hover:bg-slate-800 text-white'
@@ -1868,11 +1945,27 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 />
               </svg>
               {isRefreshing ? 
-                `Refreshing (${refreshProgress.current}/${refreshProgress.total})` : 
+                `Syncing (${refreshProgress.current}/${refreshProgress.total})` : 
                 isRefreshConfirming ? 'Are you sure?' : 
-                'Refresh Orders'}
+                'Sync with ShipHero'}
             </button>
-          )}
+            )}
+            
+            {/* Real-time Status Indicator */}
+            {isInitialLoad ? (
+              <div className="flex items-center space-x-2 text-sm text-gray-600">
+                <svg className="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span>Loading data...</span>
+              </div>
+            ) : (
+              <div className="flex items-center space-x-2 text-sm text-green-600">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <span>Real-time updates active</span>
+              </div>
+            )}
           </div>
 
           {/* Mobile Title - Only visible on mobile */}
@@ -1883,20 +1976,21 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
             </p>
           </div>
 
-          {/* Shared refresh log for both mobile and desktop */}
-          {isRefreshing && refreshLog.length > 0 && (
-            <div className="fixed bottom-4 right-4 w-96 max-h-96 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
-              <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-3">
-                <h3 className="text-white font-semibold">Refresh Progress</h3>
-              </div>
-              <div className="p-4 space-y-2 overflow-y-auto max-h-80">
-                {refreshLog.map((log, index) => (
-                  <div key={index} className="text-sm text-gray-600">{log}</div>
-                ))}
-              </div>
+        </div>
+
+        {/* Shared refresh log for both mobile and desktop */}
+        {isRefreshing && refreshLog.length > 0 && (
+          <div className="fixed bottom-4 right-4 w-96 max-h-96 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50">
+            <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-3">
+              <h3 className="text-white font-semibold">Refresh Progress</h3>
             </div>
-          )}
-        </>
+            <div className="p-4 space-y-2 overflow-y-auto max-h-80">
+              {refreshLog.map((log, index) => (
+                <div key={index} className="text-sm text-gray-600">{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex flex-col md:flex-row items-start gap-6 md:gap-12 mt-6 md:mt-10 pt-2 md:pt-5">
           <div className="flex flex-col justify-start pt-2 flex-[1.6]">
@@ -2360,7 +2454,20 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {paginateData(filteredTodayOrders, todayPageSize, todayCurrentPage).map((order, idx) => (
+                {isProcessingData ? (
+                  <tr>
+                    <td colSpan="7" className="px-6 py-8 text-center text-gray-500">
+                      <div className="flex items-center justify-center space-x-2">
+                        <svg className="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Processing data...</span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  paginateData(filteredTodayOrders, todayPageSize, todayCurrentPage).map((order, idx) => (
                   <tr 
                     key={order.id} 
                     className={`
@@ -2430,7 +2537,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                       </button>
                     </td>
                   </tr>
-                ))}
+                ))
+                )}
               </tbody>
               <tfoot className="bg-gray-50">
                 <tr>
@@ -2898,6 +3006,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
             </div>
           </div>
         )}
+        </>
       </div>
 
     </div>

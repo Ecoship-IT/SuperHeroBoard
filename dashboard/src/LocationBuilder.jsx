@@ -502,8 +502,7 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                 <span>SuperHero Board</span>
               </div>
             </Link>
-            {/* Temporarily hidden Level Up Log */}
-            {/* <Link 
+            <Link 
               to="/level-up-log" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
@@ -523,7 +522,7 @@ const LocationBuilder = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                 </svg>
                 <span>Level Up Log</span>
               </div>
-            </Link> */}
+            </Link>
             {isAuthenticated && userRole === 'admin' && (
               <Link 
                 to="/efm-product-sizes" 
