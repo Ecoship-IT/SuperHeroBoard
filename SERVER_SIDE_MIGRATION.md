@@ -1,4 +1,4 @@
-# **SuperHero Board Server-Side Migration Plan** test
+# **SuperHero Board Server-Side Migration Plan**
 
 **Approach:** On-demand HTTP endpoint + 60-second in-memory cache (no Firestore triggers)
 
