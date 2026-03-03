@@ -1,8 +1,8 @@
 import { useEffect, useState, useMemo, useCallback, memo } from 'react';
 import { Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom';
 import { db } from './firebase';
-import { collection, onSnapshot, query, orderBy, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, BarChart, Bar } from 'recharts';
+import { onSnapshot, doc, updateDoc, deleteDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import EFMProductSizes from './EFMProductSizes';
 import PasswordGate from './PasswordGate';
 import AppWrapper from './AppWrapper';
@@ -161,16 +161,19 @@ const FilterSection = ({
   );
 };
 
+const getBoardSummaryUrl = () => {
+  const env = import.meta.env.VITE_GET_BOARD_SUMMARY_URL;
+  if (env) return env;
+  const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
+  return `https://us-central1-${projectId}.cloudfunctions.net/getBoardSummary`;
+};
+
 export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const location = useLocation();
-  const [orders, setOrders] = useState([]);
-  const [notReadyToShipOrders, setNotReadyToShipOrders] = useState([]);
+  const [boardSummary, setBoardSummary] = useState(null);
+  const [boardLoading, setBoardLoading] = useState(true);
+  const [boardError, setBoardError] = useState(null);
   const [showAllClients, setShowAllClients] = useState(false);
-  const [currentSlide, setCurrentSlide] = useState('clientList');
-  const [sortField, setSortField] = useState('allocated_at');
-  const [sortDirection, setSortDirection] = useState('desc');
-  const [pageSize, setPageSize] = useState(25);
-  const [currentPage, setCurrentPage] = useState(1);
   const [todayPageSize, setTodayPageSize] = useState(25);
   const [todayCurrentPage, setTodayCurrentPage] = useState(1);
   const [tomorrowPageSize, setTomorrowPageSize] = useState(25);
@@ -192,16 +195,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [customEndDate, setCustomEndDate] = useState('');
   const [todayOrderSearch, setTodayOrderSearch] = useState('');
   const [todayOrderSearchInput, setTodayOrderSearchInput] = useState('');
-  
-  // All orders table filters
-  const [allOrdersClient, setAllOrdersClient] = useState('all');
-  const [allOrdersStatus, setAllOrdersStatus] = useState('all');
-  const [allOrdersDateRange, setAllOrdersDateRange] = useState('all');
-  const [allOrdersCustomStartDate, setAllOrdersCustomStartDate] = useState('');
-  const [allOrdersCustomEndDate, setAllOrdersCustomEndDate] = useState('');
-  const [allOrdersSLAMet, setAllOrdersSLAMet] = useState('all');
-  const [allOrdersSearch, setAllOrdersSearch] = useState('');
-  const [allOrdersSearchInput, setAllOrdersSearchInput] = useState('');
 
   // Tomorrow orders table filters
   const [tomorrowOrdersClient, setTomorrowOrdersClient] = useState('all');
@@ -211,9 +204,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   const [tomorrowOrdersCustomEndDate, setTomorrowOrdersCustomEndDate] = useState('');
   const [tomorrowOrdersSearch, setTomorrowOrdersSearch] = useState('');
   const [tomorrowOrdersSearchInput, setTomorrowOrdersSearchInput] = useState('');
-
-  // Add new state for trend view
-  const [trendTimeframe, setTrendTimeframe] = useState('daily'); // 'daily', 'weekly', 'monthly'
 
   // State for manual completion confirmation
   const [confirmingManual, setConfirmingManual] = useState(null); // orderNumber being confirmed
@@ -314,66 +304,84 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     };
   }, []); // Calculate once
 
-  // Memoize account lookup map - faster than object property access
+  const ordersToShipToday = boardSummary?.todayOrders ?? [];
+  const ordersToShipTomorrow = boardSummary?.tomorrowOrders ?? [];
+  const shippedToday = boardSummary?.shippedTodayOrders ?? [];
+  const shippedTodayCount = boardSummary?.shippedTodayCount ?? 0;
+  const notReadyToShipOrders = boardSummary?.notReadyToShipOrders ?? [];
+
+  const ordersForLookup = useMemo(() => [
+    ...ordersToShipToday,
+    ...ordersToShipTomorrow,
+    ...shippedToday,
+    ...notReadyToShipOrders
+  ], [ordersToShipToday, ordersToShipTomorrow, shippedToday, notReadyToShipOrders]);
+
   const accountLookup = useMemo(() => {
-    const lookup = new Map(); // Map is faster than object for lookups
-    
-    orders.forEach(order => {
+    const lookup = new Map();
+    ordersForLookup.forEach(order => {
       if (!lookup.has(order.account_uuid)) {
         lookup.set(
-          order.account_uuid, 
+          order.account_uuid,
           accountMap[order.account_uuid] || order.account_uuid || 'Unknown'
         );
       }
     });
-    
     return lookup;
-  }, [orders, accountMap]);
+  }, [ordersForLookup, accountMap]);
 
-  // Real-time listeners for orders and not_ready_to_ship collections
-  // This replaces expensive polling with efficient real-time updates
-  useEffect(() => {
-    console.log('🔄 Setting up real-time listeners for orders...');
-    
-    // Subscribe to orders collection
-    const ordersQuery = query(collection(db, 'orders'), orderBy('allocated_at', 'desc'));
-    const unsubscribeOrders = onSnapshot(ordersQuery, (snapshot) => {
-      const ordersData = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setOrders(ordersData);
-      console.log(`✅ Orders updated - ${ordersData.length} orders`);
-      
-      // Mark initial load as complete after first snapshot
-      if (isInitialLoad) {
-        setIsInitialLoad(false);
-      }
-    }, (error) => {
-      console.error('❌ Orders listener error:', error);
-    });
-    
-    // Subscribe to not_ready_to_ship collection
-    const notReadyQuery = query(collection(db, 'not_ready_to_ship'), orderBy('removed_at', 'desc'));
-    const unsubscribeNotReady = onSnapshot(notReadyQuery, (snapshot) => {
-      const notReadyData = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setNotReadyToShipOrders(notReadyData);
-      console.log(`✅ Not ready to ship updated - ${notReadyData.length} orders`);
-    }, (error) => {
-      console.error('❌ Not ready listener error:', error);
-    });
-    
-    // Cleanup: unsubscribe from both listeners when component unmounts
-    return () => {
-      console.log('🔌 Disconnecting real-time listeners...');
-      unsubscribeOrders();
-      unsubscribeNotReady();
-    };
-  }, []); // Only run once on mount
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentSlide((prev) => (prev === 'clientList' ? 'pieChart' : 'clientList'));
-    }, 7000);
-    return () => clearInterval(interval);
+  const fetchBoardSummary = useCallback(async (forceRefresh = false) => {
+    const tStart = performance.now();
+    console.log(`[BoardPerf] fetchBoardSummary HTTP request started`);
+    setBoardLoading(true);
+    setBoardError(null);
+    try {
+      const url = getBoardSummaryUrl() + (forceRefresh ? '?refresh=1' : '');
+      const res = await fetch(url);
+      const tAfterFetch = performance.now();
+      if (!res.ok) throw new Error(res.statusText || 'Failed to fetch');
+      const data = await res.json();
+      const tAfterJson = performance.now();
+      console.log(`[BoardPerf] fetchBoardSummary HTTP done: fetch=${Math.round(tAfterFetch - tStart)}ms, json=${Math.round(tAfterJson - tAfterFetch)}ms, total=${Math.round(tAfterJson - tStart)}ms`);
+      setBoardSummary(data);
+      if (isInitialLoad) setIsInitialLoad(false);
+    } catch (err) {
+      console.error('[BoardPerf] fetchBoardSummary error:', err);
+      setBoardError(err.message);
+    } finally {
+      setBoardLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    const tMount = performance.now();
+    setBoardLoading(true);
+    const unsub = onSnapshot(
+      doc(db, 'board_summary', 'current'),
+      (snapshot) => {
+        const elapsed = Math.round(performance.now() - tMount);
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          console.log(`[BoardPerf] Firestore doc received in ${elapsed}ms (path: board_summary/current)`);
+          setBoardSummary(data);
+          setBoardError(null);
+          setBoardLoading(false);
+        } else {
+          console.log(`[BoardPerf] Firestore doc missing after ${elapsed}ms, falling back to HTTP`);
+          fetchBoardSummary();
+        }
+        if (isInitialLoad) setIsInitialLoad(false);
+      },
+      (err) => {
+        const elapsed = Math.round(performance.now() - tMount);
+        console.error(`[BoardPerf] Board summary listener error after ${elapsed}ms:`, err);
+        setBoardError(err.message);
+        setBoardLoading(false);
+        fetchBoardSummary();
+      }
+    );
+    return () => unsub();
+  }, [fetchBoardSummary]);
 
   // Helper function to check if a date is a US federal holiday
   const isBankHoliday = (date) => {
@@ -589,15 +597,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     return shippedDate <= requiredDate;
   };
 
-  // Memoize expensive computations
-  const ordersToShipToday = useMemo(() => {
-    return orders.filter(order => 
-      needsShippedToday(order) &&
-      statusChecks.isShippable(order) &&
-      statusChecks.isReadyToShip(order)
-    );
-  }, [orders, statusChecks]);
-
   const needsShippedTomorrow = (order) => {
     // Check for ShipHero override first
     if (order && typeof order === 'object' && order.ship_tomorrow_override !== undefined) {
@@ -657,44 +656,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     return shipDateStr === tomorrowStr;
   };
 
-  const ordersToShipTomorrow = useMemo(() => {
-    return orders.filter(order =>
-      needsShippedTomorrow(order) &&
-      !['shipped', 'canceled', 'cleared', 'deallocated', 'wholesale', 'manual'].includes(order.status) &&
-      order.ready_to_ship === true
-    );
-  }, [orders]);
-
-  const shippedToday = useMemo(() => {
-    return orders.filter(order => {
-      if (!statusChecks.isShipped(order) || !order.shippedAt) return false;
-      try {
-        // Inline UTC parsing to avoid circular dependency
-        let shipDate;
-        if (order.shippedAt.toDate) {
-          shipDate = order.shippedAt.toDate();
-        } else if (typeof order.shippedAt === 'string') {
-          // Handle UTC timestamps properly
-          let timeStr = order.shippedAt;
-          if (order.shippedAt.includes('T')) {
-            timeStr = order.shippedAt.replace('T', ' ');
-          }
-          shipDate = new Date(timeStr + ' UTC');
-        } else {
-          shipDate = new Date(order.shippedAt);
-        }
-        
-        if (!shipDate || isNaN(shipDate.getTime())) return false;
-        
-        // Compare using Eastern timezone like the hourly chart
-        const shipDateEastern = shipDate.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-        return shipDateEastern === todayDate.eastern;
-      } catch {
-        return false;
-      }
-    });
-  }, [orders, statusChecks, todayDate.eastern]);
-
   const groupedSorted = useMemo(() => {
     const grouped = {};
     ordersToShipToday.forEach(order => {
@@ -709,43 +670,11 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   }, [groupedSorted, showAllClients]);
 
   const pieData = useMemo(() => [
-    { name: 'Shipped', value: shippedToday.length },
+    { name: 'Shipped', value: shippedTodayCount },
     { name: 'Unshipped', value: ordersToShipToday.length }
-  ], [shippedToday.length, ordersToShipToday.length]);
+  ], [shippedTodayCount, ordersToShipToday.length]);
 
   const COLORS = ['#16a34a', '#dc2626'];
-
-  const handleSort = useCallback((field) => {
-    if (sortField === field) {
-      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortField(field);
-      setSortDirection('asc');
-    }
-  }, [sortField, sortDirection]);
-
-  const sortedOrders = useMemo(() => {
-    return [...orders].sort((a, b) => {
-      let aValue, bValue;
-
-      if (sortField === 'client') {
-        aValue = accountLookup.get(a.account_uuid);
-        bValue = accountLookup.get(b.account_uuid);
-      } else if (sortField === 'allocated_at' || sortField === 'shippedAt') {
-        aValue = a[sortField]?.toDate?.() || new Date(a[sortField] || 0);
-        bValue = b[sortField]?.toDate?.() || new Date(b[sortField] || 0);
-      } else {
-        aValue = a[sortField];
-        bValue = b[sortField];
-      }
-
-      if (sortDirection === 'asc') {
-        return aValue > bValue ? 1 : -1;
-      } else {
-        return aValue < bValue ? 1 : -1;
-      }
-    });
-  }, [orders, sortField, sortDirection, accountLookup]);
 
   const exportToCSV = useCallback((data, filename) => {
     const headers = ['Order #', 'Client', 'Status', 'Line Items', 'Allocated At', 'Required Ship Date', 'Shipped At', 'SLA Met'];
@@ -753,7 +682,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       order.order_number,
       accountLookup.get(order.account_uuid),
       order.status,
-      Array.isArray(order.line_items) ? order.line_items.length : 0,
+      (typeof order.line_items_count === 'number' ? order.line_items_count : Array.isArray(order.line_items) ? order.line_items.length : 0),
       order.allocated_at?.toDate?.()?.toLocaleString() || new Date(order.allocated_at).toLocaleString(),
       (() => { 
         try { 
@@ -904,13 +833,13 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
   }, []);
 
   const uniqueClients = useMemo(() => {
-    return [...new Set(orders.map(order => order.account_uuid))]
+    return [...new Set(ordersForLookup.map(order => order.account_uuid))]
       .map(uuid => ({
         value: uuid || 'unknown',
         label: accountMap[uuid] || uuid || 'Unknown'
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
-  }, [orders]);
+  }, [ordersForLookup, accountMap]);
 
   const getDateRange = useCallback((rangeType, customStart = null, customEnd = null) => {
     const now = new Date();
@@ -994,19 +923,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
     );
   }, [ordersToShipToday, selectedClient, selectedStatus, todayOrderSearch]);
 
-  const filteredAllOrders = useMemo(() => {
-    return filterOrders(
-      sortedOrders,
-      allOrdersClient,
-      allOrdersStatus,
-      allOrdersDateRange,
-      allOrdersCustomStartDate,
-      allOrdersCustomEndDate,
-      allOrdersSLAMet,
-      allOrdersSearch
-    );
-  }, [sortedOrders, allOrdersClient, allOrdersStatus, allOrdersDateRange, allOrdersCustomStartDate, allOrdersCustomEndDate, allOrdersSLAMet, allOrdersSearch]);
-
   const filteredTomorrowOrders = useMemo(() => {
     return filterOrders(
       ordersToShipTomorrow,
@@ -1030,108 +946,10 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      setAllOrdersSearch(allOrdersSearchInput);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [allOrdersSearchInput]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
       setTomorrowOrdersSearch(tomorrowOrdersSearchInput);
     }, 300);
     return () => clearTimeout(timer);
   }, [tomorrowOrdersSearchInput]);
-
-  const getHourlyShippingData = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    // Initialize data array with hours from 7 AM to 3 PM
-    const hourlyData = Array.from({ length: 9 }, (_, index) => {
-      const hour = index + 7;
-      return {
-        hour: `${hour === 12 ? '12 PM' : hour > 12 ? `${hour - 12} PM` : `${hour} AM`}`,
-        orders: 0,
-        timestamp: new Date(today).setHours(hour, 0, 0, 0)
-      };
-    });
-
-    // Count orders for each hour (PROPERLY FIXED FOR EASTERN TIME) - OPTIMIZED
-    let processedCount = 0;
-    let filteredOutCount = 0;
-    
-    // Early exit if no orders
-    if (shippedToday.length === 0) {
-      return hourlyData;
-    }
-    
-    // Limit processing to last 1000 orders for performance
-    const ordersToProcess = shippedToday.slice(0, 1000);
-    
-    ordersToProcess.forEach((order) => {
-      try {
-        // Inline UTC parsing to avoid circular dependency
-        let shippedTime;
-        if (!order.shippedAt) {
-          return;
-        }
-        
-        if (order.shippedAt.toDate) {
-          shippedTime = order.shippedAt.toDate();
-        } else if (typeof order.shippedAt === 'string') {
-          // Handle UTC timestamps properly
-          let timeStr = order.shippedAt;
-          if (order.shippedAt.includes('T')) {
-            timeStr = order.shippedAt.replace('T', ' ');
-          }
-          shippedTime = new Date(timeStr + ' UTC');
-        } else {
-          shippedTime = new Date(order.shippedAt);
-        }
-        
-        if (!shippedTime || isNaN(shippedTime.getTime())) {
-          return;
-        }
-        
-        // Get Eastern hour using toLocaleString
-        const easternHour = parseInt(shippedTime.toLocaleString('en-US', {
-          timeZone: 'America/New_York',
-          hour: 'numeric',
-          hour12: false
-        }));
-        
-        // Debug first few orders
-        
-        // Only count orders between 7 AM and 3 PM (Eastern time)
-        if (easternHour >= 7 && easternHour <= 15) {
-          const index = easternHour - 7;
-          if (hourlyData[index]) {
-            hourlyData[index].orders++;
-            processedCount++;
-          }
-        } else {
-          filteredOutCount++;
-        }
-      } catch (error) {
-        console.error('Error processing order:', error);
-      }
-    });
-    
-
-    return hourlyData;
-  }, [shippedToday]);
-
-  const CustomTooltip = ({ active, payload, label }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="bg-white p-4 shadow-lg rounded-lg border border-gray-200">
-          <p className="text-gray-600">{`Time: ${label}`}</p>
-          <p className="text-blue-600 font-bold">{`Orders Shipped: ${payload[0].value}`}</p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   const parseShipHeroTimestamp = useCallback((timestamp) => {
     if (!timestamp) return null;
@@ -1399,145 +1217,9 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
       setIsRefreshing(false);
       setIsRefreshConfirming(false);
       setRefreshProgress({ current: 0, total: 0 });
+      fetchBoardSummary(true);
     }
   };
-
-  // Simplified and optimized shipping volume trends
-  const getShippingTrends = useMemo(() => {
-    // Only use last 7 days for better performance
-    const now = new Date();
-    const daysAgo = trendTimeframe === 'daily' ? 7 : trendTimeframe === 'weekly' ? 21 : 30;
-    const startDate = new Date(now.getTime() - (daysAgo * 24 * 60 * 60 * 1000));
-    
-    // Pre-filter shipped orders only - OPTIMIZED
-    const shippedOrders = orders.filter(order => 
-      order.status === 'shipped' && 
-      order.shippedAt
-    );
-
-    // Early exit if no orders
-    if (shippedOrders.length === 0) {
-      return { data: [], average: 0 };
-    }
-
-    // Limit processing to last 2000 orders for performance
-    const ordersToProcess = shippedOrders.slice(0, 2000);
-
-    // Group orders by time period
-    const grouped = {};
-    let totalOrders = 0;
-    
-    ordersToProcess.forEach(order => {
-      try {
-        const shippedDate = order.shippedAt.toDate ? order.shippedAt.toDate() : new Date(order.shippedAt);
-        if (shippedDate >= startDate) {
-          let key;
-          if (trendTimeframe === 'daily') {
-            key = shippedDate.toISOString().split('T')[0];
-          } else if (trendTimeframe === 'weekly') {
-            const weekStart = new Date(shippedDate);
-            weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-            key = weekStart.toISOString().split('T')[0];
-          } else {
-            key = shippedDate.toISOString().slice(0, 7);
-          }
-          grouped[key] = (grouped[key] || 0) + 1;
-          totalOrders++;
-        }
-      } catch (e) {
-        // Skip invalid dates
-      }
-    });
-
-    // Create simplified data array
-    const data = Object.entries(grouped)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, orders]) => ({
-        date: trendTimeframe === 'weekly' ? `Week of ${date}` : 
-              trendTimeframe === 'monthly' ? new Date(date + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : 
-              date,
-        orders,
-        average: totalOrders / Math.max(Object.keys(grouped).length, 1)
-      }));
-
-    return { 
-      data, 
-      average: totalOrders / Math.max(Object.keys(grouped).length, 1) 
-    };
-  }, [orders, trendTimeframe]);
-
-  // Get hourly allocation data for orders coming in (24 hours) - OPTIMIZED
-  const getHourlyAllocationData = useMemo(() => {
-    // Initialize data array with all 24 hours
-    const hourlyData = Array.from({ length: 24 }, (_, index) => ({
-      hour: `${index === 0 ? '12 AM' : index === 12 ? '12 PM' : index > 12 ? `${index - 12} PM` : `${index} AM`}`,
-      orders: 0,
-      hourNumber: index
-    }));
-
-    // Early exit if no orders
-    if (orders.length === 0) {
-      return hourlyData;
-    }
-
-    // Count orders allocated today by hour (PROPERLY FIXED FOR EASTERN TIME)
-    const today = new Date();
-    const todayEastern = today.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-
-    // Limit processing to last 1000 orders for performance
-    const ordersToProcess = orders.slice(0, 1000);
-
-    ordersToProcess.forEach(order => {
-      try {
-        if (!order.allocated_at) return;
-        
-        // Inline UTC parsing to avoid circular dependency
-        let allocatedTime;
-        if (order.allocated_at.toDate) {
-          allocatedTime = order.allocated_at.toDate();
-        } else if (typeof order.allocated_at === 'string') {
-          // Handle UTC timestamps properly
-          let timeStr = order.allocated_at;
-          if (order.allocated_at.includes('T')) {
-            timeStr = order.allocated_at.replace('T', ' ');
-          }
-          allocatedTime = new Date(timeStr + ' UTC');
-        } else {
-          allocatedTime = new Date(order.allocated_at);
-        }
-        
-        if (!allocatedTime || isNaN(allocatedTime.getTime())) return;
-        
-        // Convert to Eastern time for comparison
-        const allocatedEastern = allocatedTime.toLocaleDateString('en-US', {timeZone: 'America/New_York'});
-        
-        // Only count orders from today (Eastern time)
-        if (allocatedEastern === todayEastern) {
-          // Get Eastern hour using toLocaleString
-          const easternHour = parseInt(allocatedTime.toLocaleString('en-US', {
-            timeZone: 'America/New_York',
-            hour: 'numeric',
-            hour12: false
-          }));
-          
-          if (hourlyData[easternHour]) {
-            hourlyData[easternHour].orders++;
-          }
-        }
-      } catch (error) {
-        console.error('Error processing allocation time:', error);
-      }
-    });
-
-    // Calculate average and add to each data point
-    const totalOrders = hourlyData.reduce((sum, hour) => sum + hour.orders, 0);
-    const average = totalOrders / 24;
-    
-    return hourlyData.map(hour => ({
-      ...hour,
-      average: average
-    }));
-  }, [orders]);
 
   // Loading screen component
   const LoadingScreen = () => (
@@ -1626,8 +1308,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
         </div>
         <div className="px-4">
           <nav className="space-y-4">
-            <a 
-              href="http://10.1.10.240:5173" 
+            <Link 
+              to="/" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
             >
               <div className="flex items-center space-x-2">
@@ -1646,7 +1328,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 </svg>
                 <span>SuperHero Board</span>
               </div>
-            </a>
+            </Link>
             <Link 
               to="/level-up-log" 
               className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
@@ -1755,6 +1437,27 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 <span>Countdown</span>
               </div>
             </Link>
+            <Link 
+              to="/client-reports" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                  />
+                </svg>
+                <span>Client Reports</span>
+              </div>
+            </Link>
           </nav>
           
           {/* Logout Button at Bottom */}
@@ -1833,12 +1536,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                       return () => clearTimeout(timer);
                     }
                     
-                    // Get orders that need to be shipped today
-                    const ordersToVerify = orders.filter(order => 
-                      needsShippedToday(order) &&
-                      !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
-                      order.ready_to_ship === true
-                    );
+                    // Orders to verify = today's orders from board summary
+                    const ordersToVerify = ordersToShipToday;
 
                     // Get orders from not_ready_to_ship that need to be rechecked
                     const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
@@ -1889,8 +1588,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
               Real-time order overview for when <i>ship</i> gets real
             </p>
           </div>
-          {/* Refresh Controls - Both buttons in one container */}
-          <div className="absolute top-10 right-0 flex flex-col items-end space-y-1.5">
+          {/* Refresh Controls - icon-only below 1285px to avoid overlap with title */}
+          <div className="absolute top-10 right-0 flex flex-col items-end">
             {(isAuthenticated && (userRole === 'admin' || userRole === 'limited')) && (
             <button
               onClick={() => {
@@ -1905,12 +1604,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                   return () => clearTimeout(timer);
                 }
                 
-                // Get orders that need to be shipped today
-                const ordersToVerify = orders.filter(order => 
-                  needsShippedToday(order) &&
-                  !['shipped', 'canceled', 'cleared', 'deallocated'].includes(order.status) &&
-                  order.ready_to_ship === true
-                );
+                // Orders to verify = today's orders from board summary
+                const ordersToVerify = ordersToShipToday;
 
                 // Get orders from not_ready_to_ship that need to be rechecked
                 const notReadyOrdersToVerify = notReadyToShipOrders.filter(order =>
@@ -1920,7 +1615,8 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                 processOrders(ordersToVerify, notReadyOrdersToVerify);
               }}
               disabled={isRefreshing}
-              className={`px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-w-[160px] justify-center ${
+              title="Sync with ShipHero"
+              className={`p-2 min-[1050px]:px-3 min-[1050px]:py-2 min-[1285px]:px-4 min-[1285px]:py-2 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm min-[1285px]:min-w-[160px] justify-center ${
                 isRefreshing ? 'bg-blue-600 opacity-75 cursor-not-allowed' :
                 isRefreshConfirming ? 'bg-red-600 hover:bg-red-700 text-white' : 
                 'bg-slate-700 hover:bg-slate-800 text-white'
@@ -1944,26 +1640,24 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                   }
                 />
               </svg>
-              {isRefreshing ? 
-                `Syncing (${refreshProgress.current}/${refreshProgress.total})` : 
-                isRefreshConfirming ? 'Are you sure?' : 
-                'Sync with ShipHero'}
+              <span className="hidden min-[1050px]:inline min-[1285px]:hidden whitespace-nowrap">
+                {isRefreshing ? `Syncing (${refreshProgress.current}/${refreshProgress.total})` : isRefreshConfirming ? 'Sure?' : 'Refresh'}
+              </span>
+              <span className="hidden min-[1285px]:inline whitespace-nowrap">
+                {isRefreshing ? 
+                  `Syncing (${refreshProgress.current}/${refreshProgress.total})` : 
+                  isRefreshConfirming ? 'Are you sure?' : 
+                  'Sync with ShipHero'}
+              </span>
             </button>
             )}
-            
-            {/* Real-time Status Indicator */}
-            {isInitialLoad ? (
-              <div className="flex items-center space-x-2 text-sm text-gray-600">
+            {isInitialLoad && (
+              <div className="flex items-center space-x-2 text-sm text-gray-600 mt-1.5 min-[1285px]:mt-0">
                 <svg className="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
-                <span>Loading data...</span>
-              </div>
-            ) : (
-              <div className="flex items-center space-x-2 text-sm text-green-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>Real-time updates active</span>
+                <span className="hidden min-[1285px]:inline">Loading data...</span>
               </div>
             )}
           </div>
@@ -1992,8 +1686,18 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
           </div>
         )}
 
+        {boardError && (
+          <div className="mb-4 p-3 bg-red-100 border border-red-300 rounded-lg flex items-center justify-between">
+            <span className="text-red-800">Failed to load board: {boardError}</span>
+            <button onClick={fetchBoardSummary} className="px-3 py-1 bg-red-200 hover:bg-red-300 rounded text-sm">Retry</button>
+          </div>
+        )}
         <div className="flex flex-col md:flex-row items-start gap-6 md:gap-12 mt-6 md:mt-10 pt-2 md:pt-5">
           <div className="flex flex-col justify-start pt-2 flex-[1.6]">
+            {boardLoading && !boardSummary ? (
+              <div className="text-2xl text-slate-500 animate-pulse">Loading board...</div>
+            ) : (
+            <>
             <div className="text-6xl md:text-9xl font-extrabold text-slate-900 mb-2 text-left">{ordersToShipToday.length}</div>
             <div className="text-2xl md:text-4xl text-slate-700 font-medium text-left mb-1">🚚 Needs shipped today</div>
             <div className="text-6xl md:text-9xl font-extrabold text-slate-800 mb-2 text-left pt-6 md:pt-10">
@@ -2002,10 +1706,12 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
             <div className="text-2xl md:text-4xl text-slate-600 font-medium text-left mb-1">🎉 Shipped today</div>
             <div className="text-6xl md:text-9xl font-extrabold text-slate-700 mb-2 text-left pt-6 md:pt-10">{ordersToShipTomorrow.length}</div>
             <div className="text-2xl md:text-4xl text-slate-500 font-medium text-left mb-1 pb-8 md:pb-12">📅 Needs shipped tomorrow</div>
+            </>
+            )}
           </div>
 
-          <div className="flex-[1.4] w-full h-full">
-            <div className="h-full">
+          <div className="flex-[1.4] min-w-0 w-full h-full">
+            <div className="h-full min-w-0">
               <div>
                 <h2 className="text-2xl font-bold text-slate-800 mb-3">🏆 Top Clients by Open Orders 🏆</h2>
                 <div className="overflow-y-auto max-h-[300px]">
@@ -2034,363 +1740,52 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
               </div>
 
               <div className="mt-8 mb-4">
-                {/* Desktop layout - side by side */}
-                <div className="hidden md:flex items-center justify-between">
-                  <div className="flex items-center">
-                    <div className="relative w-[300px] h-[300px] p-4">
-                        <ResponsiveContainer width="100%" height="100%">
-                        <PieChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-                            <Pie 
-                              data={pieData} 
-                              dataKey="value" 
-                              nameKey="name" 
-                            outerRadius={120} 
-                            innerRadius={60}
-                              isAnimationActive={true}
-                              label={({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
-                                const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-                                const x = cx + radius * Math.cos(-midAngle * (Math.PI / 180));
-                                const y = cy + radius * Math.sin(-midAngle * (Math.PI / 180));
-                                return (
-                                  <text
-                                    x={x}
-                                    y={y}
-                                    fill="white"
-                                    textAnchor="middle"
-                                    dominantBaseline="middle"
-                                    className="text-base font-bold"
-                                  >
-                                    {`${(percent * 100).toFixed(0)}%`}
-                                  </text>
-                                );
-                              }}
-                              labelLine={false}
-                            >
-                              {pieData.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={COLORS[index]} />
-                              ))}
-                            </Pie>
-                          </PieChart>
-                        </ResponsiveContainer>
-                    </div>
-                    <div className="flex flex-col items-start gap-6 ml-8">
-                      <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 rounded-full" style={{ backgroundColor: COLORS[0] }}></div>
-                        <div className="text-3xl text-slate-800">
-                          Shipped Orders
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 rounded-full" style={{ backgroundColor: COLORS[1] }}></div>
-                        <div className="text-3xl text-slate-800">
-                          Unshipped Orders
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Mobile layout - bigger chart, no external labels */}
-                <div className="block md:hidden">
-                  <div className="flex justify-center">
-                    <div className="relative w-full max-w-[350px] h-[350px] p-2">
-                        <ResponsiveContainer width="100%" height="100%">
-                        <PieChart margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-                            <Pie 
-                              data={pieData} 
-                              dataKey="value" 
-                              nameKey="name" 
-                            outerRadius={140} 
-                            innerRadius={70}
-                              isAnimationActive={true}
-                              label={({ cx, cy, midAngle, innerRadius, outerRadius, percent, value }) => {
-                                const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-                                const x = cx + radius * Math.cos(-midAngle * (Math.PI / 180));
-                                const y = cy + radius * Math.sin(-midAngle * (Math.PI / 180));
-                                return (
-                                  <text
-                                    x={x}
-                                    y={y}
-                                    fill="white"
-                                    textAnchor="middle"
-                                    dominantBaseline="middle"
-                                    className="text-lg font-bold"
-                                  >
-                                    {`${(percent * 100).toFixed(0)}%`}
-                                  </text>
-                                );
-                              }}
-                              labelLine={false}
-                            >
-                              {pieData.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={COLORS[index]} />
-                              ))}
-                            </Pie>
-                          </PieChart>
-                        </ResponsiveContainer>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 md:mt-40 mb-10">
-          <div className="bg-gradient-to-r from-teal-600 to-teal-800 p-6">
-            <h2 className="text-2xl font-bold text-white">Today's Shipping Activity</h2>
-            <p className="text-teal-100 mt-1">Hourly breakdown of shipped orders</p>
-          </div>
-          <div className="p-6">
-            <div className="w-full h-[400px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart
-                  data={getHourlyShippingData}
-                  margin={{
-                    top: 20,
-                    right: 30,
-                    left: 20,
-                    bottom: 20,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                  <XAxis 
-                    dataKey="hour"
-                    stroke="#6B7280"
-                    tick={{ fill: '#374151' }}
-                    tickLine={{ stroke: '#6B7280' }}
-                  />
-                  <YAxis
-                    stroke="#6B7280"
-                    tick={{ fill: '#374151' }}
-                    tickLine={{ stroke: '#6B7280' }}
-                  />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="orders"
-                    name="Orders Shipped"
-                    stroke="#0D9488"
-                    strokeWidth={3}
-                    dot={{ fill: '#0D9488', strokeWidth: 2 }}
-                    activeDot={{ r: 8 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* New Shipping Volume Trends Section */}
-        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
-          <div className="bg-gradient-to-r from-cyan-600 to-teal-600 p-4 sm:p-6">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-              <div>
-                <h2 className="text-xl sm:text-2xl font-bold text-white">Shipping Volume Trends</h2>
-                <p className="text-cyan-100 mt-1 text-sm sm:text-base">Historical shipping volume analysis</p>
-              </div>
-              <div className="flex flex-wrap gap-2 w-full sm:w-auto">
-                <button
-                  onClick={() => setTrendTimeframe('daily')}
-                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
-                    trendTimeframe === 'daily'
-                      ? 'bg-white text-cyan-700'
-                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
-                  }`}
-                >
-                  Daily
-                </button>
-                <button
-                  onClick={() => setTrendTimeframe('weekly')}
-                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
-                    trendTimeframe === 'weekly'
-                      ? 'bg-white text-cyan-700'
-                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
-                  }`}
-                >
-                  Weekly
-                </button>
-                <button
-                  onClick={() => setTrendTimeframe('monthly')}
-                  className={`flex-1 sm:flex-none px-3 sm:px-4 py-2 rounded-lg transition-colors duration-150 text-sm sm:text-base ${
-                    trendTimeframe === 'monthly'
-                      ? 'bg-white text-cyan-700'
-                      : 'bg-cyan-700 text-white hover:bg-cyan-600'
-                  }`}
-                >
-                  Monthly
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="p-3 sm:p-6">
-            {(() => {
-              const trends = getShippingTrends;
-                const averageText = trendTimeframe === 'daily' ? 'per day' :
-                                  trendTimeframe === 'weekly' ? 'per week' : 'per month';
-              
-              return (
-                <>
-                  <div className="mb-4 p-3 sm:p-4 bg-gradient-to-r from-cyan-50 to-teal-50 rounded-lg border border-cyan-100">
-                    <div className="text-base sm:text-lg text-cyan-900">
-                      Average Orders {averageText}:{' '}
-                      <span className="font-bold text-xl sm:text-2xl text-cyan-700 block sm:inline mt-1 sm:mt-0">
-                        {Math.round(trends.average * 10) / 10}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="w-full h-[300px] sm:h-[400px]">
+                <div className="flex flex-col sm:flex-row items-center gap-4 sm:gap-6 min-w-0">
+                  <div className="relative shrink-0 w-[240px] min-w-[240px] h-[240px] sm:w-[280px] sm:min-w-[280px] sm:h-[280px] md:w-[300px] md:min-w-[300px] md:h-[300px] p-2">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart
-                        data={trends.data}
-                        margin={{
-                          top: 20,
-                          right: 10,
-                          left: 0,
-                          bottom: 60,
-                        }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                        <XAxis 
-                          dataKey="date"
-                          stroke="#6B7280"
-                          tick={{ 
-                            fill: '#374151',
-                            fontSize: windowWidth < 640 ? 10 : 12 
+                      <PieChart margin={{ top: 12, right: 12, bottom: 12, left: 12 }}>
+                        <Pie
+                          data={pieData}
+                          dataKey="value"
+                          nameKey="name"
+                          outerRadius={110}
+                          innerRadius={55}
+                          isAnimationActive={true}
+                          label={({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
+                            const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
+                            const x = cx + radius * Math.cos(-midAngle * (Math.PI / 180));
+                            const y = cy + radius * Math.sin(-midAngle * (Math.PI / 180));
+                            return (
+                              <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="middle" className="text-sm sm:text-base font-bold">
+                                {`${(percent * 100).toFixed(0)}%`}
+                              </text>
+                            );
                           }}
-                          tickLine={{ stroke: '#6B7280' }}
-                          angle={-45}
-                          textAnchor="end"
-                          height={60}
-                          interval={windowWidth < 640 ? 1 : 0}
-                        />
-                        <YAxis
-                          stroke="#6B7280"
-                          tick={{ 
-                            fill: '#374151',
-                            fontSize: windowWidth < 640 ? 10 : 12
-                          }}
-                          tickLine={{ stroke: '#6B7280' }}
-                          width={windowWidth < 640 ? 30 : 40}
-                        />
-                        <Tooltip 
-                          content={({ active, payload, label }) => {
-                            if (active && payload && payload.length) {
-                              return (
-                                <div className="bg-white p-2 sm:p-4 shadow-lg rounded-lg border border-gray-200 text-sm sm:text-base">
-                                  <p className="text-gray-600">{label}</p>
-                                  <p className="text-cyan-600 font-bold">{`Orders: ${payload[0].value}`}</p>
-                                  <p className="text-teal-600">{`Avg: ${Math.round(payload[1].value * 10) / 10}`}</p>
-                                </div>
-                              );
-                            }
-                            return null;
-                          }}
-                          wrapperStyle={{ zIndex: 1000 }}
-                        />
-                        <Legend 
-                          wrapperStyle={{
-                            fontSize: windowWidth < 640 ? '0.75rem' : '0.875rem',
-                            marginTop: '0.5rem'
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="orders"
-                          name="Orders"
-                          stroke="#0891b2"
-                          strokeWidth={2}
-                          dot={{ fill: '#0891b2', strokeWidth: 1, r: windowWidth < 640 ? 2 : 3 }}
-                          activeDot={{ r: windowWidth < 640 ? 6 : 8 }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="average"
-                          name="Avg"
-                          stroke="#0d9488"
-                          strokeWidth={2}
-                          strokeDasharray="5 5"
-                          dot={false}
-                        />
-                      </LineChart>
+                          labelLine={false}
+                        >
+                          {pieData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index]} />
+                          ))}
+                        </Pie>
+                      </PieChart>
                     </ResponsiveContainer>
                   </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-
-        {/* Hourly Order Allocation Chart */}
-        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
-          <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
-            <h2 className="text-2xl font-bold text-white">Today's Order Allocation by Hour</h2>
-            <p className="text-blue-100 mt-1">Number of orders allocated each hour (24-hour view)</p>
-          </div>
-          <div className="p-6">
-            <div className="w-full h-[400px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={getHourlyAllocationData}
-                  margin={{
-                    top: 20,
-                    right: 30,
-                    left: 20,
-                    bottom: 20,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                  <XAxis 
-                    dataKey="hour"
-                    stroke="#6B7280"
-                    tick={{ fill: '#374151', fontSize: 12 }}
-                    tickLine={{ stroke: '#6B7280' }}
-                    angle={-45}
-                    textAnchor="end"
-                    height={60}
-                    interval={0}
-                  />
-                  <YAxis
-                    stroke="#6B7280"
-                    tick={{ fill: '#374151' }}
-                    tickLine={{ stroke: '#6B7280' }}
-                  />
-                                     <Tooltip 
-                     content={({ active, payload, label }) => {
-                       if (active && payload && payload.length) {
-                         return (
-                           <div className="bg-white p-4 shadow-lg rounded-lg border border-gray-200">
-                             <p className="text-gray-600">{`Hour: ${label}`}</p>
-                             <p className="text-blue-600 font-bold">{`Orders Allocated: ${payload[0].value}`}</p>
-                             <p className="text-orange-600">{`Average: ${Math.round(payload[1]?.value * 10) / 10}`}</p>
-                           </div>
-                         );
-                       }
-                       return null;
-                     }}
-                   />
-                   <Legend />
-                   <Bar
-                     dataKey="orders"
-                     name="Orders Allocated"
-                     fill="#2563EB"
-                     radius={[4, 4, 0, 0]}
-                   />
-                   <Line
-                     type="monotone"
-                     dataKey="average"
-                     name="Daily Average"
-                     stroke="#EA580C"
-                     strokeWidth={3}
-                     strokeDasharray="5 5"
-                     dot={false}
-                   />
-                </BarChart>
-              </ResponsiveContainer>
+                  <div className="hidden min-[1315px]:flex flex-col items-start gap-6 shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-5 h-5 rounded-full shrink-0" style={{ backgroundColor: COLORS[0] }}></div>
+                      <div className="text-3xl text-slate-800">Shipped Orders</div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="w-5 h-5 rounded-full shrink-0" style={{ backgroundColor: COLORS[1] }}></div>
+                      <div className="text-3xl text-slate-800">Unshipped Orders</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
+
         <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
           <div className="bg-gradient-to-r from-blue-600 to-blue-800 p-6">
             <div className="flex justify-between items-start">
@@ -2480,7 +1875,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{order.webhook_type || 'Order Allocated'}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">
-                        {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
+                        {typeof order.line_items_count === 'number' ? `${order.line_items_count} item(s)` : Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -2554,202 +1949,6 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
             currentPage={todayCurrentPage}
             setCurrentPage={setTodayCurrentPage}
             setPageSize={setTodayPageSize}
-          />
-        </div>
-
-        <div className="bg-white shadow-xl rounded-xl border-0 overflow-hidden mt-10 mb-10">
-          <div className="bg-gradient-to-r from-purple-600 to-purple-800 p-6">
-            <div className="flex justify-between items-start">
-              <div>
-                <h2 className="text-2xl font-bold text-white">All Orders</h2>
-                <p className="text-purple-100 mt-1">Complete overview of your order history</p>
-              </div>
-              <button 
-                onClick={() => exportToCSV(filteredAllOrders, `all_orders_${new Date().toISOString().split('T')[0]}.csv`)}
-                className="bg-white text-purple-700 hover:bg-purple-50 px-4 py-2 rounded-lg shadow-sm transition-colors duration-150 flex items-center space-x-2"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                <span>Export to CSV</span>
-              </button>
-            </div>
-          </div>
-          <FilterSection
-            clientValue={allOrdersClient}
-            onClientChange={setAllOrdersClient}
-            statusValue={allOrdersStatus}
-            onStatusChange={setAllOrdersStatus}
-            dateRangeValue={allOrdersDateRange}
-            onDateRangeChange={setAllOrdersDateRange}
-            customStart={allOrdersCustomStartDate}
-            onCustomStartChange={setAllOrdersCustomStartDate}
-            customEnd={allOrdersCustomEndDate}
-            onCustomEndChange={setAllOrdersCustomEndDate}
-            slaValue={allOrdersSLAMet}
-            onSLAChange={setAllOrdersSLAMet}
-            showSLA={true}
-            searchValue={allOrdersSearch}
-            onSearchChange={setAllOrdersSearch}
-            searchInputValue={allOrdersSearchInput}
-            onSearchInputChange={setAllOrdersSearchInput}
-            searchPlaceholder="Search by order number..."
-            uniqueClients={uniqueClients}
-            statusOptions={statusOptions}
-            dateRangeOptions={dateRangeOptions}
-            slaOptions={slaOptions}
-          />
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    <span className="flex items-center space-x-2">
-                      <span>Order #</span>
-                      <svg className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                    </span>
-                  </th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Client</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Line Items</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Allocated At</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Required Ship Date</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shipped At</th>
-                  <th className="group px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SLA Met</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {paginateData(filteredAllOrders, pageSize, currentPage).map((order, idx) => (
-                  <tr 
-                    key={order.id} 
-                    className={`
-                      ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
-                      hover:bg-purple-50 transition-colors duration-150 ease-in-out
-                    `}
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-purple-600">{order.order_number}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{accountMap[order.account_uuid] || order.account_uuid || 'Unknown'}</td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        order.status === 'shipped' ? 'bg-green-100 text-green-800' :
-                        order.status === 'canceled' ? 'bg-red-100 text-red-800' :
-                        order.status === 'allocated' ? 'bg-yellow-100 text-yellow-800' :
-                        order.status === 'cleared' ? 'bg-gray-100 text-gray-800' :
-                        order.status === 'wholesale' ? 'bg-purple-100 text-purple-800' :
-                        order.status === 'manual' ? 'bg-orange-100 text-orange-800' :
-                        'bg-teal-100 text-teal-800'
-                      }`}>
-                        {order.status || 'Unknown'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-purple-100 text-purple-800">
-                        {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {(() => { 
-                        try { 
-                          if (!order.allocated_at) return '—'; 
-                          const date = parseShipHeroTimestamp(order.allocated_at);
-                          return new Intl.DateTimeFormat('en-US', {
-                            timeZone: 'America/New_York',
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: true
-                          }).format(date);
-                        } catch { 
-                          return '—'; 
-                        } 
-                      })()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {(() => { 
-                        try { 
-                          const reqDate = getRequiredShipDate(order);
-                          if (!reqDate) return '—';
-                          const dateStr = new Intl.DateTimeFormat('en-US', {
-                            timeZone: 'America/New_York',
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: true
-                          }).format(reqDate);
-                          
-                          // Add indicator if using ShipHero override
-                          if (order.required_ship_date_override) {
-                            return (
-                              <div className="flex items-center gap-1">
-                                <span>{dateStr}</span>
-                                <span 
-                                  className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
-                                  title="Date from ShipHero override"
-                                >
-                                  SH
-                                </span>
-                              </div>
-                            );
-                          }
-                          return dateStr;
-                        } catch { 
-                          return '—'; 
-                        } 
-                      })()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {(() => { 
-                        try { 
-                          if (!order.shippedAt) return '—'; 
-                          const date = parseShipHeroTimestamp(order.shippedAt);
-                          return new Intl.DateTimeFormat('en-US', {
-                            timeZone: 'America/New_York',
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: true
-                          }).format(date);
-                        } catch { 
-                          return '—'; 
-                        } 
-                      })()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        !order.shippedAt ? 'bg-gray-100 text-gray-600' :
-                        checkSLAMet(order.shippedAt, order) ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                      }`}>
-                        {!order.shippedAt ? 'TBD' : checkSLAMet(order.shippedAt, order) ? 'True' : 'False'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot className="bg-gray-50">
-                <tr>
-                  <td colSpan="6" className="px-6 py-4">
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-          <Pagination
-            total={filteredAllOrders.length}
-            pageSize={pageSize}
-            currentPage={currentPage}
-            setCurrentPage={setCurrentPage}
-            setPageSize={setPageSize}
           />
         </div>
 
@@ -2829,7 +2028,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{order.webhook_type || 'Order Allocated'}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800">
-                        {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
+                        {typeof order.line_items_count === 'number' ? `${order.line_items_count} item(s)` : Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -2953,7 +2152,7 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{accountMap[order.account_uuid] || order.account_uuid || 'Unknown'}</td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-pink-100 text-pink-800">
-                          {Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
+                          {typeof order.line_items_count === 'number' ? `${order.line_items_count} item(s)` : Array.isArray(order.line_items) ? `${order.line_items.length} item(s)` : '—'}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
@@ -2977,10 +2176,12 @@ export function Dashboard({ isAuthenticated, isGuest, userRole, onLogout }) {
                         })()}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {(() => { 
-                          try { 
-                            if (!order.removed_at) return '—'; 
-                            const date = order.removed_at.toDate();
+                        {(() => {
+                          try {
+                            if (!order.removed_at) return '—';
+                            const date = typeof order.removed_at.toDate === 'function'
+                              ? order.removed_at.toDate()
+                              : new Date(order.removed_at);
                             return new Intl.DateTimeFormat('en-US', {
                               timeZone: 'America/New_York',
                               year: 'numeric',

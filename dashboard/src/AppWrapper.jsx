@@ -7,6 +7,7 @@ import LevelUpLog from './LevelUpLog';
 // import ComplianceBoard from './ComplianceBoard'; // DISABLED: Not being used, has expensive real-time listeners
 import LocationBuilder from './LocationBuilder';
 import Countdown from './Countdown';
+import ClientReports from './ClientReports';
 
 const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   const location = useLocation();
@@ -307,6 +308,7 @@ const AppWrapper = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
         {/* DISABLED: Not being used, has expensive real-time listeners */}
         {/* <Route path="/compliance-board" element={<ComplianceBoard isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} /> */}
         <Route path="/countdown" element={<Countdown isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
+        <Route path="/client-reports" element={<ClientReports isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />
         {/* Only show EFM Product Sizes to admin users */}
         {isAuthenticated && userRole === 'admin' && (
           <Route path="/efm-product-sizes" element={<EFMProductSizes isAuthenticated={isAuthenticated} isGuest={isGuest} userRole={userRole} onLogout={onLogout} />} />

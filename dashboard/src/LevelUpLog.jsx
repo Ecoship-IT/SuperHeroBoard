@@ -209,7 +209,7 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
   };
 
   return (
-    <div className="relative bg-gray-50">
+    <div className="relative min-h-screen bg-gray-50">
       {/* Hamburger Menu Row */}
       <div className="w-full p-4 pb-0">
         <button 
@@ -357,6 +357,27 @@ const LevelUpLog = ({ isAuthenticated, isGuest, userRole, onLogout }) => {
                   />
                 </svg>
                 <span>Location Builder</span>
+              </div>
+            </Link>
+            <Link 
+              to="/client-reports" 
+              className="block px-6 py-3 text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200 text-lg font-semibold border border-gray-200 shadow-sm hover:shadow-md hover:scale-[1.02] hover:border-gray-300"
+            >
+              <div className="flex items-center space-x-2">
+                <svg 
+                  className="w-5 h-5" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round" 
+                    strokeWidth={2} 
+                    d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                  />
+                </svg>
+                <span>Client Reports</span>
               </div>
             </Link>
             <Link 

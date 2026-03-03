@@ -1,7 +1,12 @@
-const functions = require('firebase-functions');
+const functions = require('firebase-functions/v1');
 const admin = require('firebase-admin');
 const fetch = require('node-fetch');
 const cors = require('cors')({ origin: true });
+const { BigQuery } = require('@google-cloud/bigquery');
+const { defineJsonSecret } = require('firebase-functions/params');
+const shipDateLogic = require('./shipDateLogic');
+
+const config = defineJsonSecret('FUNCTIONS_CONFIG_EXPORT2');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -32,10 +37,10 @@ function validateQueueItem(queueData, queueId) {
   return { valid: true };
 }
 
-// Slack notification helper for failed queue items
-async function sendSlackFailureNotification(queueData, queueId, error, attempts) {
+// Slack notification helper for failed queue items (cfg from config.value())
+async function sendSlackFailureNotification(queueData, queueId, error, attempts, cfg) {
   try {
-    const webhookUrl = functions.config().slack?.webhook_url;
+    const webhookUrl = cfg?.slack?.webhook_url;
     if (!webhookUrl) {
       console.log('⚠️ Slack webhook URL not configured, skipping notification');
       return;
@@ -203,8 +208,8 @@ exports.efmBoxAssignmentWebhook = functions.https.onRequest((req, res) => {
   });
 });
 
-// EFM Box Assignment Processing
-async function processEFMBoxAssignment(webhookData) {
+// EFM Box Assignment Processing (cfg from config.value())
+async function processEFMBoxAssignment(webhookData, cfg) {
   const logCollection = db.collection('efm_box_assignments');
   const startTime = Date.now();
 
@@ -407,7 +412,7 @@ async function processEFMBoxAssignment(webhookData) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
           },
           body: JSON.stringify(mutationBody)
         });
@@ -507,8 +512,9 @@ async function processEFMBoxAssignment(webhookData) {
 
 // EFM Queue Processor - Processes queue items one at a time with delays
 // Triggered by Firestore document creation or scheduled function
-exports.processEFMQueue = functions.https.onRequest(async (req, res) => {
+exports.processEFMQueue = functions.runWith({ secrets: [config] }).https.onRequest(async (req, res) => {
   cors(req, res, async () => {
+    const cfg = config.value();
     const PROCESSING_DELAY_MS = 1000; // 1 second delay between items
     const MAX_ATTEMPTS = 3;
 
@@ -577,7 +583,7 @@ exports.processEFMQueue = functions.https.onRequest(async (req, res) => {
 
       try {
         // Call the existing processing function
-        await processEFMBoxAssignment(webhookData);
+        await processEFMBoxAssignment(webhookData, cfg);
         processingResult = { success: true };
       } catch (error) {
         processingError = error.message || 'Unknown error';
@@ -605,7 +611,7 @@ exports.processEFMQueue = functions.https.onRequest(async (req, res) => {
           console.log(`❌ Queue item ${queueId} failed after ${attempts} attempts`);
           
           // Send failure notification
-          await sendSlackFailureNotification(queueData, queueId, processingError, attempts);
+          await sendSlackFailureNotification(queueData, queueId, processingError, attempts, cfg);
         } else {
           // Retry - mark as pending again but set retryAfter to prevent immediate retry in same run
           const retryAfterTime = new Date(Date.now() + 60000); // 1 minute from now
@@ -635,7 +641,8 @@ exports.processEFMQueue = functions.https.onRequest(async (req, res) => {
 
 // Scheduled function to process queue continuously
 // Runs every minute and processes 5 items with delays between them (5 orders/minute)
-exports.processEFMQueueScheduled = functions.pubsub.schedule('* * * * *').onRun(async (context) => {
+exports.processEFMQueueScheduled = functions.runWith({ secrets: [config] }).pubsub.schedule('* * * * *').onRun(async (context) => {
+  const cfg = config.value();
   const PROCESSING_DELAY_MS = 1000; // 1 second delay between items
   const MAX_ITEMS_PER_RUN = 5; // Process up to 5 items per scheduled run (5 orders/minute)
   const MAX_ATTEMPTS = 3;
@@ -707,7 +714,7 @@ exports.processEFMQueueScheduled = functions.pubsub.schedule('* * * * *').onRun(
 
       try {
         // Call the existing processing function
-        await processEFMBoxAssignment(webhookData);
+        await processEFMBoxAssignment(webhookData, cfg);
         processingResult = { success: true };
       } catch (error) {
         processingError = error.message || 'Unknown error';
@@ -735,7 +742,7 @@ exports.processEFMQueueScheduled = functions.pubsub.schedule('* * * * *').onRun(
           console.log(`❌ Queue item ${queueId} failed after ${attempts} attempts`);
           
           // Send failure notification
-          await sendSlackFailureNotification(queueData, queueId, processingError, attempts);
+          await sendSlackFailureNotification(queueData, queueId, processingError, attempts, cfg);
         } else {
           // Retry - mark as pending again but set retryAfter to prevent immediate retry in same run
           const retryAfterTime = new Date(Date.now() + 60000); // 1 minute from now
@@ -1247,13 +1254,13 @@ const needsShippedToday = (allocatedAt) => {
   return shipDateStr === todayStr;
 };
 
-const verifyOrderWithGraphQL = async (orderNumber, retryCount = 0) => {
+const verifyOrderWithGraphQL = async (orderNumber, retryCount, cfg) => {
   try {
     const response = await fetch('https://public-api.shiphero.com/graphql', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+        'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
       },
       body: JSON.stringify({
         query: `
@@ -1290,7 +1297,7 @@ const verifyOrderWithGraphQL = async (orderNumber, retryCount = 0) => {
         const delay = Math.pow(2, retryCount + 1) * 1000;
         console.log(`⏰ Waiting ${delay}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        return verifyOrderWithGraphQL(orderNumber, retryCount + 1);
+        return verifyOrderWithGraphQL(orderNumber, retryCount + 1, cfg);
       } else {
         console.error(`❌ Max retries reached for order ${orderNumber}`);
         return null;
@@ -1316,7 +1323,7 @@ const verifyOrderWithGraphQL = async (orderNumber, retryCount = 0) => {
       console.log(`🔄 Retrying order ${orderNumber} due to network error...`);
       const delay = (retryCount + 1) * 1000;
       await new Promise(resolve => setTimeout(resolve, delay));
-      return verifyOrderWithGraphQL(orderNumber, retryCount + 1);
+      return verifyOrderWithGraphQL(orderNumber, retryCount + 1, cfg);
     }
     
     return null;
@@ -1328,7 +1335,7 @@ const processOrders = async (ordersToProcess) => {
   const updatedOrders = [...orders];
 
   for (const order of ordersToProcess) {
-    const result = await verifyOrderWithGraphQL(order.order_number);
+    const result = await verifyOrderWithGraphQL(order.order_number, 0, cfg);
     
     if (result) {
       // Find the order in our local state
@@ -1388,9 +1395,11 @@ const processOrders = async (ordersToProcess) => {
 exports.verifyOrders = functions
   .runWith({
     timeoutSeconds: 540,
-    memory: '1GB'
+    memory: '1GB',
+    secrets: [config]
   })
   .https.onRequest(async (req, res) => {
+    const cfg = config.value();
     // Set CORS headers
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -1445,7 +1454,7 @@ exports.verifyOrders = functions
           console.log(`🔍 Processing order ${processedCount + j + 1}/${ordersToVerify.length}: ${order.order_number}`);
           
           try {
-            const result = await verifyOrderWithGraphQL(order.order_number);
+            const result = await verifyOrderWithGraphQL(order.order_number, 0, cfg);
             
             if (result) {
               console.log(`✅ Got GraphQL result for ${order.order_number}`);
@@ -1619,7 +1628,7 @@ exports.verifyOrders = functions
             console.log(`🔍 Processing not-ready order: ${order.order_number}`);
             
             try {
-              const result = await verifyOrderWithGraphQL(order.order_number);
+              const result = await verifyOrderWithGraphQL(order.order_number, 0, cfg);
               
               if (result) {
                 const isReadyToShip = result.allocations?.[0]?.ready_to_ship ?? true;
@@ -1761,9 +1770,11 @@ exports.verifyOrders = functions
 exports.testVerifyOrders = functions
   .runWith({
     timeoutSeconds: 60,
-    memory: '1GB'
+    memory: '1GB',
+    secrets: [config]
   })
   .https.onRequest(async (req, res) => {
+    const cfg = config.value();
     // Set CORS headers
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -1804,7 +1815,7 @@ exports.testVerifyOrders = functions
         console.log(`🔍 Processing test order ${i + 1}/${testOrders.length}: ${order.order_number}`);
         
         try {
-          const result = await verifyOrderWithGraphQL(order.order_number);
+          const result = await verifyOrderWithGraphQL(order.order_number, 0, cfg);
           
           if (result) {
             console.log(`✅ Got GraphQL result for ${order.order_number}`);
@@ -1882,7 +1893,8 @@ exports.testConnection = functions.https.onRequest((req, res) => {
   });
 });
 
-exports.fixOrder = functions.https.onRequest(async (req, res) => {
+exports.fixOrder = functions.runWith({ secrets: [config] }).https.onRequest(async (req, res) => {
+  const cfg = config.value();
   // Set CORS headers
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -1927,7 +1939,7 @@ exports.fixOrder = functions.https.onRequest(async (req, res) => {
     console.log(`📋 Current order data for ${orderNumber}:`, currentData);
     
     // Check ShipHero to get the real status
-    const shippedData = await verifyOrderWithGraphQL(orderNumber);
+    const shippedData = await verifyOrderWithGraphQL(orderNumber, 0, cfg);
     
     if (!shippedData) {
       res.status(500).json({
@@ -1984,7 +1996,8 @@ exports.fixOrder = functions.https.onRequest(async (req, res) => {
   }
 });
 
-exports.createLocation = functions.https.onRequest(async (req, res) => {
+exports.createLocation = functions.runWith({ secrets: [config] }).https.onRequest(async (req, res) => {
+  const cfg = config.value();
   // Set CORS headers
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -2034,7 +2047,7 @@ exports.createLocation = functions.https.onRequest(async (req, res) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+        'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
       },
       body: JSON.stringify({ query: mutation })
     });
@@ -2114,8 +2127,9 @@ exports.createLocation = functions.https.onRequest(async (req, res) => {
   }
 });
 
-exports.getFillRate = functions.https.onRequest((req, res) => {
+exports.getFillRate = functions.runWith({ secrets: [config] }).https.onRequest((req, res) => {
   cors(req, res, async () => {
+    const cfg = config.value();
     if (req.method !== 'POST') {
       res.status(405).send('Method Not Allowed');
       return;
@@ -2175,7 +2189,7 @@ exports.getFillRate = functions.https.onRequest((req, res) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
           },
           body: JSON.stringify(queryBody),
           signal: controller.signal
@@ -2925,8 +2939,9 @@ exports.collectDailyGmailResponseTime = functions.pubsub.schedule('0 0 * * *').t
   }
 });
 
-exports.processBackorders = functions.https.onRequest((req, res) => {
+exports.processBackorders = functions.runWith({ secrets: [config] }).https.onRequest((req, res) => {
   cors(req, res, async () => {
+    const cfg = config.value();
     if (req.method !== 'POST') {
       res.status(405).send('Method Not Allowed');
       return;
@@ -2987,7 +3002,7 @@ exports.processBackorders = functions.https.onRequest((req, res) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
           },
           body: JSON.stringify(queryBody)
         });
@@ -3070,7 +3085,7 @@ exports.processBackorders = functions.https.onRequest((req, res) => {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+              'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
             },
             body: JSON.stringify(mutationBody)
           });
@@ -3154,11 +3169,13 @@ function getNextBusinessDay(date) {
 exports.scheduledBackorderProcessing = functions
   .runWith({
     timeoutSeconds: 540,  // 9 minutes timeout (maximum allowed)
-    memory: '256MB'
+    memory: '256MB',
+    secrets: [config]
   })
   .pubsub.schedule('0 8 * * 1-5') // 8 AM UTC = 4 AM EDT, 3 AM EST
   .timeZone('America/New_York')
   .onRun(async (context) => {
+    const cfg = config.value();
     console.log('🚀 ===== SCHEDULED FUNCTION TRIGGERED =====');
     console.log('⏰ Scheduled backorder processing triggered at:', new Date().toISOString());
     console.log('📍 Function context:', JSON.stringify(context, null, 2));
@@ -3212,7 +3229,7 @@ exports.scheduledBackorderProcessing = functions
       // Test ShipHero API token access
       console.log('🔑 Testing ShipHero API token access...');
       try {
-        const token = functions.config().shiphero.api_token;
+        const token = cfg?.shiphero?.api_token;
         if (token) {
           console.log('✅ ShipHero API token found (length:', token.length, ')');
           console.log('🔑 Token preview:', token.substring(0, 10) + '...');
@@ -3269,7 +3286,7 @@ exports.scheduledBackorderProcessing = functions
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+              'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
             },
             body: JSON.stringify(queryBody)
           });
@@ -3408,7 +3425,7 @@ exports.scheduledBackorderProcessing = functions
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+              'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
             },
             body: JSON.stringify(mutationBody)
           });
@@ -3492,11 +3509,13 @@ exports.scheduledBackorderProcessing = functions
 exports.processFillRateIssues = functions
   .runWith({
     timeoutSeconds: 540,  // 9 minutes timeout (maximum allowed)
-    memory: '256MB'
+    memory: '256MB',
+    secrets: [config]
   })
   .pubsub.schedule('0 5 * * *') // 5 AM UTC = midnight EST
   .timeZone('America/New_York')
   .onRun(async (context) => {
+    const cfg = config.value();
     console.log('🚀 ===== FILL RATE ISSUES PROCESSING TRIGGERED =====');
     console.log('⏰ Processing fill rate issues at:', new Date().toISOString());
     
@@ -3551,7 +3570,7 @@ exports.processFillRateIssues = functions
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${functions.config().shiphero.api_token}`
+            'Authorization': `Bearer ${cfg?.shiphero?.api_token}`
           },
           body: JSON.stringify(queryBody)
         });
@@ -3655,3 +3674,309 @@ exports.processFillRateIssues = functions
       throw error;
     }
   });
+
+// --- Board Summary (dirty flag + scheduled recompute) ---
+const BOARD_CACHE_MS = 60 * 1000;
+let boardCache = null;
+let boardCacheTime = 0;
+
+function toPlainOrder(docSnap) {
+  const data = docSnap.data ? docSnap.data() : docSnap;
+  const id = docSnap.id || data.id;
+  const out = { id, ...data };
+  ['allocated_at', 'shippedAt', 'removed_at', 'required_ship_date_override'].forEach(field => {
+    if (out[field] && typeof out[field].toDate === 'function') {
+      out[field] = out[field].toDate().toISOString();
+    }
+  });
+  return out;
+}
+
+/** Slim order for board_summary/current to stay under Firestore 1MB limit */
+const BOARD_ORDER_FIELDS = [
+  'id', 'account_uuid', 'order_number', 'status', 'webhook_type',
+  'allocated_at', 'shippedAt', 'removed_at', 'required_ship_date_override',
+  'ship_today_override', 'ship_tomorrow_override', 'ready_to_ship', 'reason'
+];
+
+function toSlimOrder(docSnap) {
+  const data = docSnap.data ? docSnap.data() : docSnap;
+  const id = docSnap.id || data.id;
+  const out = { id };
+  for (const k of BOARD_ORDER_FIELDS) {
+    if (k in data && data[k] !== undefined) {
+      let v = data[k];
+      if (['allocated_at', 'shippedAt', 'removed_at', 'required_ship_date_override'].includes(k) && v && typeof v.toDate === 'function') {
+        v = v.toDate().toISOString();
+      }
+      out[k] = v;
+    }
+  }
+  out.line_items_count = Array.isArray(data.line_items) ? data.line_items.length : 0;
+  return out;
+}
+
+/** Recursively convert nested arrays to Firestore-safe structure (array of objects) */
+function sanitizeForFirestore(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    const hasNested = value.some(x => Array.isArray(x));
+    if (hasNested) {
+      return value.map(item =>
+        Array.isArray(item)
+          ? Object.fromEntries(item.map((v, i) => [String(i), sanitizeForFirestore(v)]))
+          : sanitizeForFirestore(item)
+      );
+    }
+    return value.map(sanitizeForFirestore);
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = sanitizeForFirestore(v);
+  }
+  return out;
+}
+
+async function computeBoardSummary() {
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  sevenDaysAgo.setHours(0, 0, 0, 0);
+  const sevenDaysAgoStr = sevenDaysAgo.toISOString().slice(0, 19);
+
+  const [ordersSnap, notReadySnap] = await Promise.all([
+    db.collection('orders')
+      .where('allocated_at', '>=', sevenDaysAgoStr)
+      .orderBy('allocated_at', 'desc')
+      .get(),
+    db.collection('not_ready_to_ship')
+      .orderBy('removed_at', 'desc')
+      .limit(500)
+      .get()
+  ]);
+
+  const orders = ordersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const todayOrders = orders.filter(o =>
+    shipDateLogic.needsShippedToday(o) &&
+    shipDateLogic.isShippable(o) &&
+    shipDateLogic.isReadyToShip(o)
+  );
+  const tomorrowOrders = orders.filter(o =>
+    shipDateLogic.needsShippedTomorrow(o) &&
+    shipDateLogic.isShippable(o) &&
+    shipDateLogic.isReadyToShip(o)
+  );
+  const shippedToday = orders.filter(o =>
+    o.status === 'shipped' && shipDateLogic.isShippedToday(o)
+  );
+  const notReadyToShipOrders = notReadySnap.docs.map(d => toPlainOrder(d));
+
+  const grouped = {};
+  todayOrders.forEach(o => {
+    const uuid = o.account_uuid || 'unknown';
+    grouped[uuid] = (grouped[uuid] || 0) + 1;
+  });
+  // Firestore rejects nested arrays; use [{uuid, count}, ...] instead of [[uuid, count], ...]
+  const groupedByAccountUuid = Object.entries(grouped)
+    .sort((a, b) => b[1] - a[1])
+    .map(([uuid, count]) => ({ uuid, count }));
+
+  return {
+    todayOrders: todayOrders.map(o => toSlimOrder({ id: o.id, data: () => o })),
+    tomorrowOrders: tomorrowOrders.map(o => toSlimOrder({ id: o.id, data: () => o })),
+    shippedTodayCount: shippedToday.length,
+    shippedTodayOrders: shippedToday.map(o => toSlimOrder({ id: o.id, data: () => o })),
+    groupedByAccountUuid,
+    notReadyToShipOrders: notReadyToShipOrders.map(o => toSlimOrder(o)),
+    lastUpdated: new Date().toISOString()
+  };
+}
+
+async function setBoardDirty() {
+  await db.doc('board_state/dirty').set({ dirty: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+}
+
+exports.setBoardDirtyOnOrderChange = functions.firestore
+  .document('orders/{orderId}')
+  .onWrite(() => setBoardDirty());
+
+exports.setBoardDirtyOnNotReadyChange = functions.firestore
+  .document('not_ready_to_ship/{docId}')
+  .onWrite(() => setBoardDirty());
+
+exports.scheduledBoardSummary = functions
+  .runWith({ timeoutSeconds: 300 })
+  .pubsub.schedule('* * * * *')
+  .timeZone('America/New_York')
+  .onRun(async () => {
+    const tStart = Date.now();
+    console.log(`[BoardPerf] scheduledBoardSummary invoked at ${tStart}`);
+    try {
+      const dirtySnap = await db.doc('board_state/dirty').get();
+      const isDirty = !dirtySnap.exists || dirtySnap.data()?.dirty === true;
+
+      if (!isDirty) {
+        console.log(`[BoardPerf] scheduledBoardSummary skipped (not dirty) in ${Date.now() - tStart}ms`);
+        return null;
+      }
+
+      const tBeforeCompute = Date.now();
+      const result = await computeBoardSummary();
+      const computeMs = Date.now() - tBeforeCompute;
+      const serialized = sanitizeForFirestore(result);
+      await db.doc('board_summary/current').set(serialized);
+      await db.doc('board_state/dirty').set({ dirty: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      const totalMs = Date.now() - tStart;
+      console.log(`[BoardPerf] scheduledBoardSummary done: compute=${computeMs}ms, total=${totalMs}ms`);
+      return null;
+    } catch (error) {
+      console.error('[BoardPerf] scheduledBoardSummary error:', error);
+      throw error;
+    }
+  });
+
+/** Force immediate recompute and write of board_summary/current (bypasses dirty flag) */
+exports.forceBoardRefresh = functions
+  .runWith({ timeoutSeconds: 300 })
+  .https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      console.log('[BoardPerf] forceBoardRefresh invoked');
+      const result = await computeBoardSummary();
+      const serialized = sanitizeForFirestore(result);
+      await db.doc('board_summary/current').set(serialized);
+      await db.doc('board_state/dirty').set({ dirty: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      console.log('[BoardPerf] forceBoardRefresh done');
+      res.status(200).json({ success: true, lastUpdated: result.lastUpdated });
+    } catch (error) {
+      console.error('[BoardPerf] forceBoardRefresh error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+});
+
+exports.getBoardSummary = functions.https.onRequest((req, res) => {
+  const tRequestStart = Date.now();
+  console.log(`[BoardPerf] getBoardSummary invoked at ${tRequestStart}`);
+  cors(req, res, async () => {
+    try {
+      const tAfterCors = Date.now();
+      const coldStartMs = tAfterCors - tRequestStart;
+      console.log(`[BoardPerf] first line after cors: ${coldStartMs}ms from invoke (cold start indicator)`);
+
+      const forceRefresh = req.url && req.url.includes('refresh=');
+      if (!forceRefresh && Date.now() - boardCacheTime < BOARD_CACHE_MS && boardCache) {
+        const totalMs = Date.now() - tRequestStart;
+        console.log(`[BoardPerf] CACHE HIT, returning in ${totalMs}ms (coldStart: ${coldStartMs}ms)`);
+        return res.status(200).json(boardCache);
+      }
+
+      const tBeforeCompute = Date.now();
+      const result = await computeBoardSummary();
+      const computeMs = Date.now() - tBeforeCompute;
+      boardCache = result;
+      boardCacheTime = Date.now();
+      const totalMs = Date.now() - tRequestStart;
+      console.log(`[BoardPerf] CACHE MISS, compute: ${computeMs}ms, total: ${totalMs}ms (coldStart: ${coldStartMs}ms)`);
+      return res.status(200).json(result);
+    } catch (error) {
+      console.error('[BoardPerf] getBoardSummary error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  });
+});
+
+// --- SLA Export to BigQuery (cross-project, for Power BI) ---
+// Config: firebase functions:config:set bigquery.project_id="..." bigquery.dataset_id="..." bigquery.table_id="slaTable"
+
+async function runSlaExportToBigQuery(cfg) {
+  const bqConfig = cfg?.bigquery || {};
+  const projectId = bqConfig.project_id;
+  const datasetId = bqConfig.dataset_id;
+  const tableId = bqConfig.table_id || 'sla_orders';
+
+  if (!projectId || !datasetId) {
+    throw new Error('Missing config. Set bigquery.project_id and bigquery.dataset_id');
+  }
+
+  // Range: previous Friday through Thursday (day before run). When run Friday 1:30pm -> Fri–Thu week ending yesterday.
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() - 1); // yesterday (Thursday when run on Friday)
+  endDate.setHours(23, 59, 59, 999);
+  const endDateStr = endDate.toISOString().slice(0, 19);
+
+  const startDate = new Date(endDate);
+  startDate.setDate(startDate.getDate() - 6); // 7 days inclusive: Fri–Thu
+  startDate.setHours(0, 0, 0, 0);
+  const startDateStr = startDate.toISOString().slice(0, 19);
+
+  const ordersSnap = await db.collection('orders')
+    .where('allocated_at', '>=', startDateStr)
+    .where('allocated_at', '<=', endDateStr)
+    .get();
+
+  const rows = [];
+  const now = new Date().toISOString();
+
+  for (const doc of ordersSnap.docs) {
+    const o = { id: doc.id, ...doc.data() };
+    const requiredShipDate = shipDateLogic.getRequiredShipDate(o);
+    let slaMet = null;
+    if (o.status === 'shipped' && o.shippedAt) {
+      slaMet = shipDateLogic.checkSLAMet(o.shippedAt, o);
+    }
+
+    const allocatedAt = o.allocated_at && (o.allocated_at.toDate ? o.allocated_at.toDate() : new Date(o.allocated_at));
+    const shippedAt = o.shippedAt && (o.shippedAt.toDate ? o.shippedAt.toDate() : new Date(o.shippedAt));
+
+    rows.push({
+      order_id: o.id,
+      order_number: o.order_number || o.id,
+      account_uuid: o.account_uuid || null,
+      allocated_at: allocatedAt ? allocatedAt.toISOString() : null,
+      shipped_at: shippedAt ? shippedAt.toISOString() : null,
+      required_ship_date: requiredShipDate ? requiredShipDate.toISOString().slice(0, 10) : null,
+      sla_met: slaMet,
+      status: o.status || null,
+      exported_at: now
+    });
+  }
+
+  if (rows.length === 0) {
+    return { inserted: 0, message: 'No orders to export' };
+  }
+
+  const bigquery = new BigQuery();
+  const dataset = bigquery.dataset(datasetId, { projectId });
+  const table = dataset.table(tableId);
+
+  await table.insert(rows);
+  return { inserted: rows.length, target: `${projectId}.${datasetId}.${tableId}` };
+}
+
+exports.exportSlaToBigQuery = functions.runWith({ secrets: [config] }).pubsub
+  .schedule('30 13 * * 5')
+  .timeZone('America/New_York')
+  .onRun(async () => {
+    try {
+      const cfg = config.value();
+      const result = await runSlaExportToBigQuery(cfg);
+      console.log(`exportSlaToBigQuery: inserted ${result.inserted} rows into ${result.target}`);
+      return null;
+    } catch (error) {
+      console.error('exportSlaToBigQuery error:', error);
+      throw error;
+    }
+  });
+
+exports.runSlaExportNow = functions.runWith({ secrets: [config] }).https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const cfg = config.value();
+      const result = await runSlaExportToBigQuery(cfg);
+      res.status(200).json({ success: true, ...result });
+    } catch (error) {
+      console.error('runSlaExportNow error:', error);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+});
