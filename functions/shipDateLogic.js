@@ -49,17 +49,19 @@ function isBankHoliday(date) {
     return new Date(y, m, lastDay.getDate() - offset);
   };
 
+  // Company holidays (not bank holidays)
   const holidays = [
-    new Date(year, 0, 1),
-    getNthWeekday(year, 0, 1, 3),
-    getNthWeekday(year, 1, 1, 3),
+    // Memorial Day - Last Monday in May
     getLastWeekday(year, 4, 1),
-    new Date(year, 5, 19),
+    // Independence Day - July 4
     new Date(year, 6, 4),
+    // Labor Day - 1st Monday in September
     getNthWeekday(year, 8, 1, 1),
-    getNthWeekday(year, 9, 1, 2),
-    new Date(year, 10, 11),
+    // Thanksgiving - 4th Thursday in November
     getNthWeekday(year, 10, 4, 4),
+    // Christmas Eve - December 24
+    new Date(year, 11, 24),
+    // Christmas Day - December 25
     new Date(year, 11, 25)
   ];
 
@@ -99,7 +101,7 @@ function getRequiredShipDate(order) {
   const isBeforeCutoff = allocUTC < cutoffUTC;
   let shipDate = new Date(allocUTC);
   if (!isBeforeCutoff) shipDate.setUTCDate(shipDate.getUTCDate() + 1);
-  while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+  while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0 || isBankHoliday(shipDate)) {
     shipDate.setUTCDate(shipDate.getUTCDate() + 1);
   }
   const fourPMHourUTC = isDST(new Date()) ? 20 : 21;
