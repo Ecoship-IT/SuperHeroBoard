@@ -168,22 +168,10 @@ function App() {
       return new Date(year, month, lastDay.getDate() - offset);
     };
     
-    // Check each federal holiday
+    // Company holidays (not bank holidays)
     const holidays = [
-      // New Year's Day - January 1
-      new Date(year, 0, 1),
-      
-      // Martin Luther King Jr. Day - 3rd Monday in January
-      getNthWeekday(year, 0, 1, 3),
-      
-      // Presidents' Day - 3rd Monday in February
-      getNthWeekday(year, 1, 1, 3),
-      
       // Memorial Day - Last Monday in May
       getLastWeekday(year, 4, 1),
-      
-      // Juneteenth - June 19
-      new Date(year, 5, 19),
       
       // Independence Day - July 4
       new Date(year, 6, 4),
@@ -191,14 +179,11 @@ function App() {
       // Labor Day - 1st Monday in September
       getNthWeekday(year, 8, 1, 1),
       
-      // Columbus Day - 2nd Monday in October
-      getNthWeekday(year, 9, 1, 2),
-      
-      // Veterans Day - November 11
-      new Date(year, 10, 11),
-      
       // Thanksgiving - 4th Thursday in November
       getNthWeekday(year, 10, 4, 4),
+      
+      // Christmas Eve - December 24
+      new Date(year, 11, 24),
       
       // Christmas Day - December 25
       new Date(year, 11, 25)
@@ -253,8 +238,8 @@ function App() {
       shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     
-    // Skip weekends
-    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+    // Skip weekends and holidays
+    while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0 || isBankHoliday(shipDate)) {
       shipDate.setUTCDate(shipDate.getUTCDate() + 1);
     }
     

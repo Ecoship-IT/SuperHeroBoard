@@ -1228,8 +1228,8 @@ const calculateRequiredShipDate = (allocatedAt) => {
     shipDate.setUTCDate(shipDate.getUTCDate() + 1);
   }
   
-  // Skip weekends
-  while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0) {
+  // Skip weekends and holidays
+  while (shipDate.getUTCDay() === 6 || shipDate.getUTCDay() === 0 || shipDateLogic.isBankHoliday(shipDate)) {
     shipDate.setUTCDate(shipDate.getUTCDate() + 1);
   }
   
